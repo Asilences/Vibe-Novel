@@ -37,6 +37,7 @@ from vibenovel.core.project import ProjectStore
 from vibenovel.core.toolkit import WritingToolkitStore
 from vibenovel.core.semantic import SemanticStore
 from vibenovel.core.diagnostics import WritingDiagnosticsStore
+from vibenovel.core.manuscripts import ManuscriptStore
 from vibenovel.errors import MissingDocumentError, VibeNovelError
 from .jobs import JobManager
 from .settings import public_settings, save_settings
@@ -86,6 +87,16 @@ class Decision(Input):
     note: StrictStr = Field(default="", max_length=4000)
 
 
+class EditorialSelection(Input):
+    start_char: int = Field(ge=0)
+    end_char: int = Field(ge=1)
+
+
+class EditorialOptions(Input):
+    goals: list[Literal["remove_cliches", "reduce_repetition", "show_actions", "natural_dialogue", "preserve_voice"]] = Field(max_length=5)
+    intensity: Literal["conservative", "standard", "deep"]
+
+
 class JobRequest(Input):
     kind: Literal["expand_outline", "draft", "review", "rewrite", "build_blueprint"]
     provider: Literal["api"] = "api"
@@ -97,6 +108,8 @@ class JobRequest(Input):
     planning_start: Optional[int] = Field(default=None, ge=1, le=999999)
     planning_count: Optional[int] = Field(default=None, ge=1, le=10)
     brief_mode: Optional[Literal["compact", "full"]] = None
+    selection: Optional[EditorialSelection] = None
+    editorial: Optional[EditorialOptions] = None
 
 
 class PlanningProposal(Input):
@@ -135,6 +148,23 @@ class SaveBaseline(Input):
 class AnalyzeDocument(Input):
     path: StrictStr
     expected_hash: StrictStr
+
+
+class ManuscriptSource(Input):
+    source_path: StrictStr
+    source_hash: StrictStr
+    start_lines: Optional[list[int]] = Field(default=None, max_length=80)
+
+
+class AcceptManuscriptCandidate(Input):
+    section_id: StrictStr
+    base_hash: StrictStr
+    candidate_path: StrictStr
+    candidate_hash: StrictStr
+
+
+class AuditManuscript(Input):
+    section_ids: Optional[list[StrictStr]] = Field(default=None, max_length=80)
 
 
 class MarkIssue(Input):
@@ -557,6 +587,36 @@ def create_app(workspace: Path, *, frontend_dir: Optional[Path] = None, job_mana
         return ChapterBriefStore(store.get(novel_id)).build(body.plan_path, body.expected_hash, body.mode,
                                                           document_path=body.document_path,
                                                           document_hash=body.document_hash)
+
+    @app.get("/api/projects/{novel_id}/manuscripts")
+    def manuscripts(novel_id: str):
+        return ManuscriptStore(store.get(novel_id)).list()
+
+    @app.post("/api/projects/{novel_id}/manuscripts/preview")
+    def manuscript_preview(novel_id: str, body: ManuscriptSource):
+        return ManuscriptStore(store.get(novel_id)).preview(body.source_path, body.source_hash, body.start_lines)
+
+    @app.post("/api/projects/{novel_id}/manuscripts", status_code=201)
+    def prepare_manuscript(novel_id: str, body: ManuscriptSource):
+        return ManuscriptStore(store.get(novel_id)).prepare(body.source_path, body.source_hash, body.start_lines)
+
+    @app.get("/api/projects/{novel_id}/manuscripts/{manuscript_id}")
+    def manuscript(novel_id: str, manuscript_id: str):
+        return ManuscriptStore(store.get(novel_id)).read(manuscript_id)
+
+    @app.post("/api/projects/{novel_id}/manuscripts/{manuscript_id}/accept")
+    def accept_manuscript(novel_id: str, manuscript_id: str, body: AcceptManuscriptCandidate):
+        return ManuscriptStore(store.get(novel_id)).accept(manuscript_id, body.section_id,
+            body.base_hash, body.candidate_path, body.candidate_hash)
+
+    @app.get("/api/projects/{novel_id}/manuscripts/{manuscript_id}/export")
+    def export_manuscript(novel_id: str, manuscript_id: str):
+        return ManuscriptStore(store.get(novel_id)).export(manuscript_id)
+
+    @app.post("/api/projects/{novel_id}/manuscripts/{manuscript_id}/audit")
+    def audit_manuscript(novel_id: str, manuscript_id: str, body: AuditManuscript):
+        from vibenovel.core.manuscript_audit import ManuscriptAuditStore
+        return ManuscriptAuditStore(store.get(novel_id)).analyze(manuscript_id, body.section_ids)
 
     if frontend.is_dir():
         assets = safe_path(frontend, "assets")

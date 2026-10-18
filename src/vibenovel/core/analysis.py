@@ -185,7 +185,7 @@ def _validate_report(data: dict) -> None:
 
     fields(data, {"schema_version", "id", "novel_id", "created_at", "canonical_revision", "source",
                   "dependencies", "metrics", "baseline", "issues", "coverage", "limitations"},
-           {"runtime_dependencies"})
+           {"runtime_dependencies", "explicit_corpus"})
     require(type(data["schema_version"]) is int and data["schema_version"] in (1, 2))
     legacy = data["schema_version"] == 1
     if legacy:
@@ -203,6 +203,14 @@ def _validate_report(data: dict) -> None:
     require(isinstance(data["dependencies"], dict) and len(data["dependencies"]) <= 100)
     for path, value in data["dependencies"].items():
         source({"path": path, "hash": value})
+    if "explicit_corpus" in data:
+        require(isinstance(data["explicit_corpus"], list)
+                and len(data["explicit_corpus"]) <= MAX_HISTORY_FILES)
+        paths = set()
+        for item in data["explicit_corpus"]:
+            source(item)
+            require(item["path"] not in paths)
+            paths.add(item["path"])
     metrics(data["metrics"], legacy=legacy)
     texts(data["limitations"])
 
@@ -453,7 +461,36 @@ class AnalysisStore:
             documents.append({"path": relative, "hash": digest(raw), "content": content})
         return documents, omitted
 
-    def analyze(self, path: str, expected_hash: str) -> dict:
+    def _explicit_history(self, sources, state, *, exclude):
+        """An author-selected revision corpus never expands to canonical history."""
+        if not isinstance(sources, list) or len(sources) > MAX_HISTORY_FILES:
+            raise VibeNovelError("显式对照资料最多80份")
+        documents, omitted, seen, total = [], [], set(), 0
+        for item in sources:
+            if not isinstance(item, dict) or set(item) != {"path", "hash"}:
+                raise VibeNovelError("显式对照资料需要path/hash")
+            _source_path(self.project, item["path"])
+            _expected(item["hash"])
+            if item["path"] in seen:
+                raise VibeNovelError("显式对照资料不能重复")
+            seen.add(item["path"])
+            if item["path"] == exclude:
+                continue
+            try:
+                document = self.documents._document(item["path"], state)
+            except (OSError, VibeNovelError):
+                omitted.append({"path": item["path"], "reason": "missing_or_unreadable"})
+                continue
+            if document["hash"] != item["hash"]:
+                raise ConflictError("修订对照资料已变化，请重新检查")
+            if total + document["bytes"] > MAX_CORPUS_BYTES:
+                omitted.append({"path": item["path"], "reason": "byte_limit"})
+                continue
+            total += document["bytes"]
+            documents.append(document)
+        return documents, omitted
+
+    def analyze(self, path: str, expected_hash: str, *, explicit_corpus=None) -> dict:
         _source_path(self.project, path)
         _expected(expected_hash)
         with self.storage.locked() as state:
@@ -466,7 +503,8 @@ class AnalysisStore:
             baseline["comparison_available"] = baseline["comparison"]["metrics"] is not None
             toolkit = WritingToolkitStore(self.project)
             toolkit_settings = toolkit._settings()
-            history, omitted = self._history(exclude=path)
+            history, omitted = (self._history(exclude=path) if explicit_corpus is None else
+                                self._explicit_history(explicit_corpus, state, exclude=path))
             revision = state["revision"]
         text = source["content"]
         candidates = []
@@ -578,6 +616,11 @@ class AnalysisStore:
                              "issue_limit_reached": any(counts["truncated"] for counts in rule_counts.values()),
                              "baseline_compared": baseline["comparison_available"]},
                 "limitations": LIMITATIONS}
+        if explicit_corpus is not None:
+            data["explicit_corpus"] = [{"path": item["path"], "hash": item["hash"]}
+                                       for item in explicit_corpus]
+            data["limitations"] = list(LIMITATIONS) + [
+                "本次仅对照明确选定的修订稿；未自动混入正式章或其他草稿。后续章仅供回顾性对照，不代表当前角色知情。"]
         self.documents.save(report_path, json_bytes(data).decode("utf-8"), None, "AI_SUGGESTED",
                             expected_sources=dependencies, expected_revision=revision,
                             expected_runtime_sources=data["runtime_dependencies"])
@@ -648,7 +691,13 @@ class AnalysisStore:
                         source_hash = None
                 except (OSError, VibeNovelError):
                     source_hash = None
-        report = self.analyze(previous["source"]["path"], source_hash) if source_hash else None
+        corpus = None
+        if "explicit_corpus" in previous:
+            corpus = [{"path": item["path"],
+                       "hash": _current_hash(self.project, item["path"]) or item["hash"]}
+                      for item in previous["explicit_corpus"]]
+        report = (self.analyze(previous["source"]["path"], source_hash,
+                               explicit_corpus=corpus) if source_hash else None)
         # A concurrent author mark invalidates the requested old report version.
         with self.storage.locked() as state:
             if self.documents._document(report_path, state)["hash"] != report_hash:

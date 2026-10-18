@@ -56,7 +56,7 @@ export type Job = {
   created_at: string;
   result_path?: string;
   error?: string;
-  request?: { instruction?: string; document_path?: string };
+  request?: { instruction?: string; document_path?: string; document_hash?: string; selection?: { start_char: number; end_char: number }; editorial?: { goals: string[]; intensity: "conservative" | "standard" | "deep" } };
   logs?: Array<string | Record<string, unknown>>;
   usage?: Record<string, unknown> | null;
   cost_usd?: number | null;
@@ -64,6 +64,9 @@ export type Job = {
   recovery_available?: boolean;
   recovery_candidate?: string;
   repair_candidate?: string;
+  result_hash?: string;
+  result_version_id?: string;
+  editorial_context?: { selection?: { start_char: number; end_char: number }; goals: string[]; intensity: string; sources: Record<string, string>; omitted: unknown[]; runtime_sources?: Record<string, string>; prompt_budget?: { characters: number; limit: number } };
 };
 export type Imported = {
   import_id: string;
@@ -72,6 +75,10 @@ export type Imported = {
   extracted_hash?: string;
   created_at?: string;
 };
+export type ManuscriptSection = { id: string; order: number; title: string; start_line: number; end_line: number; start_char: number; end_char: number; characters: number };
+export type ManuscriptPreview = { novel_id: string; source: { path: string; hash: string; characters: number; lines: number }; sections: ManuscriptSection[]; warnings: string[]; limitations: string[] };
+export type ManuscriptSession = { schema_version: number; id: string; novel_id: string; created_at: string; source: ManuscriptPreview["source"]; sections: (ManuscriptSection & { path: string; original_hash: string; current_hash: string | null; changed: boolean; accepted: boolean })[]; hash: string; path: string; stale: boolean; stale_reasons: string[]; limitations: string[] };
+export type ManuscriptSummary = { id: string; created_at: string; source: ManuscriptPreview["source"]; hash: string; path: string; sections?: number | ManuscriptSession["sections"] };
 
 export type PlanningEvidence = {
   path: string;

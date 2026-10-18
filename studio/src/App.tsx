@@ -73,11 +73,13 @@ import { Diff, Empty, IconButton, Modal, StepLabel } from "./ui";
 import PlanningWorkspace from "./PlanningWorkspace";
 import AnalysisWorkspace from "./AnalysisWorkspace";
 import APISettings from "./APISettings";
+import ManuscriptWorkspace from "./ManuscriptWorkspace";
 
 type Area =
   | "dashboard"
   | "planning"
   | "analysis"
+  | "manuscript"
   | "outlines"
   | "editor"
   | "approvals"
@@ -95,6 +97,7 @@ const navItems = [
   { id: "dashboard", label: "作品总览", icon: LayoutDashboard },
   { id: "planning", label: "创作规划", icon: Layers3 },
   { id: "analysis", label: "写作检查", icon: CheckCheck },
+  { id: "manuscript", label: "已有小说修订", icon: GitCompareArrows },
   { id: "outlines", label: "故事大纲", icon: ListTree },
   { id: "editor", label: "章节编辑", icon: PenLine },
   { id: "approvals", label: "作者审批", icon: ShieldCheck },
@@ -1419,6 +1422,8 @@ export default function App() {
               <span>·</span>导入内容作为参考材料
             </div>
           </div>
+        ) : area === "manuscript" ? (
+          <ManuscriptWorkspace key={project.novel_id} project={project} documents={documents} jobs={jobs} providers={bootstrap?.capabilities.providers || []} onSettings={() => setShowSettings(true)} onImport={() => fileInput.current?.click()} onRefresh={() => refresh(project.novel_id)} onOpen={(path, line, expectedHash) => void openDocument(path, true, false, line, expectedHash)} onJob={(job) => { setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)]); void refresh(project.novel_id); }} />
         ) : area === "analysis" ? (
           <AnalysisWorkspace key={project.novel_id} project={project} documents={documents} approvals={approvals} currentDocument={doc || undefined} unsavedPath={dirty ? doc?.path : undefined} onOpen={(path, line, expectedHash) => void openDocument(path, true, false, line, expectedHash)} onRefresh={() => refresh(project.novel_id)} />
         ) : area === "planning" ? (

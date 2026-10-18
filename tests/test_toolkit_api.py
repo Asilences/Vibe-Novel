@@ -5,8 +5,12 @@ import copy
 import unittest
 from unittest.mock import patch
 
-from tests import test_analysis_api as fixtures
-from tests.test_semantic import FakeEngine
+try:  # tools/run_tests.py discovers modules directly from tests/.
+    import test_analysis_api as fixtures
+    from test_semantic import FakeEngine
+except ModuleNotFoundError:
+    from tests import test_analysis_api as fixtures
+    from tests.test_semantic import FakeEngine
 
 
 @unittest.skipUnless(fixtures.TestClient, 'Optional Studio tests: install ".[studio,test]"')
