@@ -64,7 +64,7 @@ python tools/run_tests.py
 python tools/check_project.py
 ```
 
-测试全部使用临时目录，不修改真实作品。[CI 模板](docs/ci/offline-regression.yml.example)覆盖 Windows/Linux 和 Python 3.9/3.13；当前 GitHub 令牌缺少 `workflow` 权限，未启用云端 CI。之后由有相应权限的维护者复制到 `.github/workflows/tests.yml` 即可。部分 Windows 环境无符号链接权限时会显示跳过，并另测 junction 边界。
+测试全部使用临时目录，不修改真实作品。[GitHub Actions CI](.github/workflows/tests.yml)覆盖 Windows/Linux 和 Python 3.9/3.13，在 PR 更新及 `main` 推送时运行；同一分支的新提交会取消过时运行。[云端结果](https://github.com/Asilences/Vibe-Novel/actions)与本地验收记录分别查看。部分 Windows 环境无符号链接权限时会显示跳过，并另测 junction 边界。
 
 - [设计审计](docs/design_audit_v3.md)：发现、证据与修正。
 - [实施计划](docs/implementation_plan_v3.md)：M0–M5 范围、状态及需求追踪。

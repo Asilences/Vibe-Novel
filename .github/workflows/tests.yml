@@ -1,7 +1,13 @@
-# Copy to .github/workflows/tests.yml using credentials with workflow permission.
 name: Offline regression
 
-on: [push, pull_request]
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read

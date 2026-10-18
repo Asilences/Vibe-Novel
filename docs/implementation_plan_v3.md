@@ -54,5 +54,5 @@
 - 独立实现复核后补齐 GBK 环境 Emoji 输出、深层/非有限/无效 Unicode JSON、导入目录布局、正式章节 UTF-8/空章/缺章、来源段数上限回归。
 - wheel 构建成功；临时虚拟环境无网络安装验证 `vibenovel --version` 与 `python -m vibenovel ... list` 两个入口。未修改全局 Python 安装。
 - v2 `check_project.py` 通过；`build_context.py 1` 成功（按模板提示题材未填）；`check_text_overlap.py` 正常提示不足两章，没有语义审稿结论。
-- `compileall` 与 `git diff --check` 通过。提供 Windows/Linux × Python 3.9/3.13 CI 模板 `docs/ci/offline-regression.yml.example`；GitHub 因当前令牌缺少 `workflow` 权限拒绝工作流上传，所以未启用云端 CI，本地结果不冒充云端结果。
+- `compileall` 与 `git diff --check` 通过。首次上传时，原凭据缺少 `workflow` 权限，CI 曾保留为模板；现已启用 `.github/workflows/tests.yml`，覆盖 Windows/Linux × Python 3.9/3.13，在 PR 更新和 `main` 推送时回归。云端结果以 [GitHub Actions](https://github.com/Asilences/Vibe-Novel/actions) 为准，不用本地结果代替。
 - 新建 Git：`main` 保存 v2 基线，升级位于 `codex/v3-m0-foundation`。下一阶段为 M1 版本与审批，当前版本不提供正式定稿命令。
