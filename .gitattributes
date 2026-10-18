@@ -1,0 +1,4 @@
+* text=auto eol=lf
+
+# Source bundles are content-addressed. Git must preserve every original byte.
+novels/**/imports/original/** -text
