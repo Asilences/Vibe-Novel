@@ -223,9 +223,9 @@ class StudioJobTests(unittest.TestCase):
         self.assertIsNone(manager.get(self.project, first["id"])["result_path"])
 
     def test_restart_marks_running_interrupted_does_not_automatically_retry(self):
-        manager, provider = self.manager()
-        job = manager.submit(self.project, self.request(provider="codex"))
-        self.wait_state(manager, job["id"], {"awaiting_input"})
+        manager, provider = self.manager(FakeProvider(blocked=True))
+        job = manager.submit(self.project, self.request())
+        self.assertTrue(provider.started.wait(2))
         manager.close()
         path = self.project.path(".runtime/jobs/" + job["id"] + ".json")
         saved = read_json(path, max_bytes=8 * 1024 * 1024)
@@ -250,30 +250,36 @@ class StudioJobTests(unittest.TestCase):
         self.assertEqual(new_provider.calls, 0)
         self.assertEqual(list(self.project.path("outlines/proposals").glob("expanded-*")), [])
 
-    def test_codex_handoff_survives_restart_accepts_text_and_never_calls_provider(self):
+    def test_retired_codex_is_rejected_and_legacy_history_cannot_resume(self):
         manager, provider = self.manager()
-        job = manager.submit(self.project, self.request(provider="codex"))
-        awaiting = self.wait_state(manager, job["id"], {"awaiting_input"})
-        self.assertIn("作者任务", awaiting["handoff_prompt"])
+        with self.assertRaises(VibeNovelError):
+            manager.submit(self.project, self.request(provider="codex"))
         self.assertEqual(provider.calls, 0)
+        # Represent an existing pre-upgrade record using a valid API job shape.
+        job = manager.submit(self.project, self.request())
+        self.wait_state(manager, job["id"], {"succeeded"})
         manager.close()
+        path = self.project.path(".runtime/jobs/" + job["id"] + ".json")
+        saved = read_json(path, max_bytes=8 * 1024 * 1024)
+        saved.update(provider="codex", state="awaiting_input", handoff_prompt="legacy private prompt")
+        saved["request"]["provider"] = "codex"
+        path.write_bytes(json_bytes(saved))
         recovered, provider2 = self.manager()
-        self.assertEqual(recovered.get(self.project, job["id"])["state"], "awaiting_input")
-        final = recovered.complete_handoff(self.project, job["id"], "从 Codex 手动带回的候选")
-        self.assertEqual(final["state"], "succeeded")
-        self.assertIsNone(final["usage"])
+        final = recovered.get(self.project, job["id"])
+        self.assertEqual(final["state"], "interrupted")
+        self.assertNotIn("handoff_prompt", final)
         self.assertEqual(provider2.calls, 0)
-        with self.assertRaises(VibeNovelError):
-            recovered.complete_handoff(self.project, job["id"], "second return")
+        for action in (recovered.retry, recovered.resume, recovered.recover_result):
+            with self.assertRaises(VibeNovelError):
+                action(self.project, job["id"])
 
-    def test_stale_handoff_and_retry_rejected_without_writing(self):
-        manager, provider = self.manager()
-        job = manager.submit(self.project, self.request(provider="codex"))
-        self.wait_state(manager, job["id"], {"awaiting_input"})
+    def test_stale_api_result_and_retry_rejected_without_writing(self):
+        manager, provider = self.manager(FakeProvider(blocked=True))
+        job = manager.submit(self.project, self.request())
+        self.assertTrue(provider.started.wait(2))
         self.documents.save(self.source["path"], "new author text", self.source["hash"])
-        with self.assertRaises(VibeNovelError):
-            manager.complete_handoff(self.project, job["id"], "stale")
-        manager.cancel(self.project, job["id"])
+        provider.release.set()
+        self.wait_state(manager, job["id"], {"failed"})
         with self.assertRaises(VibeNovelError):
             manager.retry(self.project, job["id"])
         self.assertEqual(list(self.project.path("outlines/proposals").iterdir()), [])

@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "execution": {
-    "mode": "codex_interactive",
+    "mode": "api",
     "approval_policy": "human_for_L3",
     "plan_approval": "per_chapter",
     "default_max_draft_chapters": 1

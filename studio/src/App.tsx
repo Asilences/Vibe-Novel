@@ -30,7 +30,6 @@ import {
   CircleAlert,
   Check,
   X,
-  Copy,
   ExternalLink,
   RefreshCw,
   Play,
@@ -72,10 +71,13 @@ import type {
 } from "./api";
 import { Diff, Empty, IconButton, Modal, StepLabel } from "./ui";
 import PlanningWorkspace from "./PlanningWorkspace";
+import AnalysisWorkspace from "./AnalysisWorkspace";
+import APISettings from "./APISettings";
 
 type Area =
   | "dashboard"
   | "planning"
+  | "analysis"
   | "outlines"
   | "editor"
   | "approvals"
@@ -92,6 +94,7 @@ type ProposalDraft = {
 const navItems = [
   { id: "dashboard", label: "作品总览", icon: LayoutDashboard },
   { id: "planning", label: "创作规划", icon: Layers3 },
+  { id: "analysis", label: "写作检查", icon: CheckCheck },
   { id: "outlines", label: "故事大纲", icon: ListTree },
   { id: "editor", label: "章节编辑", icon: PenLine },
   { id: "approvals", label: "作者审批", icon: ShieldCheck },
@@ -148,13 +151,13 @@ export default function App() {
   const [selectedApproval, setSelectedApproval] = useState("");
   const [proposalTab, setProposalTab] = useState<"diff" | "after">("diff");
   const [decisionNote, setDecisionNote] = useState("");
-  const [provider, setProvider] = useState("api");
-  const providerChosen = useRef(false);
+  const [showSettings, setShowSettings] = useState(false);
   const [taskKind, setTaskKind] = useState("expand_outline");
   const [instruction, setInstruction] = useState("");
   const [planPath, setPlanPath] = useState("");
+  const [briefMode, setBriefMode] = useState<"compact" | "full">("compact");
   const [selectedJob, setSelectedJob] = useState("");
-  const [handoff, setHandoff] = useState<Job | null>(null);
+  const [repairJob, setRepairJob] = useState<Job | null>(null);
   const [candidate, setCandidate] = useState("");
   const [showSources, setShowSources] = useState(false);
   const [importEncoding, setImportEncoding] = useState("auto");
@@ -220,9 +223,6 @@ export default function App() {
       setBootstrap(boot);
       setToken(boot.csrf_token);
       setProjects(list.projects);
-      if (!providerChosen.current) {
-        setProvider(boot.capabilities.default_provider || "api");
-      }
       setReady(true);
     } catch (error) {
       setFatal(errorText(error));
@@ -312,6 +312,8 @@ export default function App() {
     setImports([]);
     setArea("dashboard");
     setPlanningPath("");
+    setRepairJob(null);
+    setCandidate("");
     const selected = projects.find((item) => item.novel_id === id) || null;
     setProject(selected);
     if (!id) return;
@@ -755,13 +757,14 @@ export default function App() {
         "POST",
         {
           kind: taskKind,
-          provider,
+          provider: "api",
           document_path: doc.path,
           document_hash: doc.hash,
           instruction: instruction.trim(),
           ...(taskKind === "draft"
             ? {
                 plan_path: planPath,
+                brief_mode: briefMode,
                 plan_hash: approvedPlans.find((item) => item.path === planPath)
                   ?.hash,
               }
@@ -771,22 +774,18 @@ export default function App() {
       await refresh(project.novel_id);
       setSelectedJob(result.id);
       setArea("tasks");
-      if (result.state === "awaiting_input") {
-        setHandoff(result);
+      if (result.provider === "api" && result.kind === "build_blueprint" && result.repair_candidate && result.state === "awaiting_input") {
+        setRepairJob(result);
         setCandidate("");
       }
-      notify(
-        result.state === "awaiting_input"
-          ? "接力上下文已准备好，交给 Codex 后可回传候选结果。"
-          : "任务已提交，可在任务记录中查看真实状态",
-      );
+      notify("任务已提交，可在任务记录中查看真实状态");
     });
   }
   async function jobAction(
     job: Job,
     action: "cancel" | "retry" | "pause" | "resume" | "recover",
   ) {
-    if (!project) return;
+    if (!project || (job.provider !== "api" && action !== "cancel")) return;
     await act(`job-${job.id}`, async () => {
       const result = await api<Job>(
         `${projectUrl(project.novel_id)}/jobs/${encodeURIComponent(job.id)}/${action}`,
@@ -794,8 +793,8 @@ export default function App() {
         {},
       );
       await refresh(project.novel_id);
-      if (result?.state === "awaiting_input") {
-        setHandoff(result);
+      if (result?.provider === "api" && result.kind === "build_blueprint" && result.repair_candidate && result.state === "awaiting_input") {
+        setRepairJob(result);
         setCandidate("");
       }
       notify(
@@ -809,19 +808,19 @@ export default function App() {
       );
     });
   }
-  async function completeHandoff(event: FormEvent) {
+  async function completeRepairJob(event: FormEvent) {
     event.preventDefault();
-    if (!project || !handoff) return;
+    if (!project || !repairJob) return;
     const id = project.novel_id;
-    await act("handoff", async () => {
+    await act("repairJob", async () => {
       const result = await api<Job>(
-        `${projectUrl(project.novel_id)}/jobs/${encodeURIComponent(handoff.id)}/complete`,
+        `${projectUrl(project.novel_id)}/jobs/${encodeURIComponent(repairJob.id)}/repair`,
         "POST",
         { content: candidate },
       );
       if (currentProject.current !== id) return;
-      if (result.state === "awaiting_input") {
-        setHandoff(result);
+      if (result.provider === "api" && result.kind === "build_blueprint" && result.repair_candidate && result.state === "awaiting_input") {
+        setRepairJob(result);
         await refresh(id);
         notify(
           result.error || "规划结果仍未通过校验，请修正后再次提交。",
@@ -829,10 +828,10 @@ export default function App() {
         );
         return;
       }
-      setHandoff(null);
+      setRepairJob(null);
       setCandidate("");
       await refresh(project.novel_id);
-      notify("接力结果已保存为候选文稿，未经审批不会成为正式正文。");
+      notify("修复结果已通过校验并保存为规划候选，仍须作者审批。");
     });
   }
   async function exportBook(event?: FormEvent) {
@@ -852,15 +851,6 @@ export default function App() {
       notify("已导出正式章节 Markdown");
     });
   }
-  async function copy(content: string) {
-    try {
-      await navigator.clipboard.writeText(content);
-      notify("已复制到剪贴板");
-    } catch {
-      notify("浏览器未允许复制，请使用下载文件。", "error");
-    }
-  }
-
   const filteredDocs = useMemo(
     () =>
       documents
@@ -893,7 +883,7 @@ export default function App() {
     approvals.find((item) => item.id === selectedApproval) || approvals[0];
   const selectedTask = jobs.find((item) => item.id === selectedJob) || jobs[0];
   const selectedProvider = bootstrap?.capabilities.providers.find(
-    (item) => item.id === provider,
+    (item) => item.id === "api",
   );
   const approvedPlans = documents.filter((item) =>
     /^outlines\/approved\/ch[0-9]{3,}\.md$/.test(item.path),
@@ -1108,6 +1098,7 @@ export default function App() {
           </div>
         )}
         <div className="sidebar-bottom">
+          <button onClick={() => setShowSettings(true)}><Settings2 size={16} /><span>模型与 API 设置</span><ArrowUpRight size={13} /></button>
           <button
             onClick={() => {
               if (project) setShowSources(true);
@@ -1418,17 +1409,15 @@ export default function App() {
               <span>·</span>导入内容作为参考材料
             </div>
           </div>
+        ) : area === "analysis" ? (
+          <AnalysisWorkspace key={project.novel_id} project={project} documents={documents} approvals={approvals} unsavedPath={dirty ? doc?.path : undefined} onOpen={(path, line) => void openDocument(path, true, false, line)} onRefresh={() => refresh(project.novel_id)} />
         ) : area === "planning" ? (
           <PlanningWorkspace
             key={project.novel_id}
             project={project}
             documents={documents}
             providers={bootstrap?.capabilities.providers || []}
-            provider={provider}
-            onProvider={(id) => {
-              providerChosen.current = true;
-              setProvider(id);
-            }}
+            onSettings={() => setShowSettings(true)}
             jobs={jobs}
             approvals={approvals}
             initialPath={planningPath}
@@ -1448,8 +1437,8 @@ export default function App() {
               ]);
               setSelectedJob(job.id);
               setArea("tasks");
-              if (job.state === "awaiting_input") {
-                setHandoff(job);
+              if (job.provider === "api" && job.kind === "build_blueprint" && job.repair_candidate && job.state === "awaiting_input") {
+                setRepairJob(job);
                 setCandidate(job.repair_candidate || "");
               }
               void refresh(id).catch((error) =>
@@ -2012,35 +2001,14 @@ export default function App() {
                         {selectedTask.error}
                       </div>
                     )}
-                    {selectedTask.state === "awaiting_input" && (
-                      <div className="handoff-card">
-                        <div>
-                          <CornerDownLeft size={18} />
-                          <strong>
-                            {selectedTask.repair_candidate
-                              ? "规划 JSON 需要修正"
-                              : "接力上下文已就绪"}
-                          </strong>
-                        </div>
-                        <p>
-                          {selectedTask.repair_candidate
-                            ? "结构或出处校验未通过，原始结果仍保留。修正后再次校验，无需重复调用模型。"
-                            : "复制上下文交给 Codex，完成后将结果回传为候选文稿。"}
-                        </p>
-                        <button
-                          className="button primary small"
-                          onClick={() => {
-                            setHandoff(selectedTask);
-                            setCandidate(selectedTask.repair_candidate || "");
-                          }}
-                        >
-                          {selectedTask.repair_candidate
-                            ? "修正规划结果"
-                            : "打开接力面板"}
-                          <ArrowUpRight size={14} />
-                        </button>
+                    {selectedTask.provider === "api" && selectedTask.kind === "build_blueprint" && selectedTask.state === "awaiting_input" && selectedTask.repair_candidate && (
+                      <div className="repair-card">
+                        <div><CircleAlert size={18} /><strong>规划 JSON 需要修正</strong></div>
+                        <p>结构或出处校验未通过，原始结果仍保留。修正后再次校验，无需重复调用模型。</p>
+                        <button className="button primary small" onClick={() => { setRepairJob(selectedTask); setCandidate(selectedTask.repair_candidate || ""); }}>修正规划结果<ArrowUpRight size={14} /></button>
                       </div>
                     )}
+                    {selectedTask.provider !== "api" && <p className="field-hint">这是旧执行方式的历史任务。可查看记录或取消，后续任务统一通过 API 执行。</p>}
                     {selectedTask.result_path && (
                       <button
                         className="result-card"
@@ -2120,7 +2088,7 @@ export default function App() {
                         </details>
                       )}
                     <div className="job-actions">
-                      {selectedTask.recovery_available && (
+                      {selectedTask.provider === "api" && selectedTask.recovery_available && (
                         <button
                           className="button primary small"
                           disabled={!!busy}
@@ -2132,7 +2100,7 @@ export default function App() {
                           恢复已生成候选
                         </button>
                       )}
-                      {["queued", "running"].includes(selectedTask.state) && (
+                      {selectedTask.provider === "api" && ["queued", "running"].includes(selectedTask.state) && (
                         <button
                           className="button secondary small"
                           disabled={!!busy}
@@ -2142,7 +2110,7 @@ export default function App() {
                           暂停任务
                         </button>
                       )}
-                      {selectedTask.state === "paused" && (
+                      {selectedTask.provider === "api" && selectedTask.state === "paused" && (
                         <button
                           className="button secondary small"
                           disabled={!!busy}
@@ -2162,7 +2130,7 @@ export default function App() {
                           取消任务
                         </button>
                       )}
-                      {["failed", "cancelled", "interrupted"].includes(
+                      {selectedTask.provider === "api" && ["failed", "cancelled", "interrupted"].includes(
                         selectedTask.state,
                       ) && (
                         <button
@@ -2220,43 +2188,8 @@ export default function App() {
             </p>
           </div>
           <form onSubmit={(event) => void startTask(event)}>
-            <label className="field-label" htmlFor="provider">
-              <Settings2 size={13} />
-              执行方式
-            </label>
-            <div className="select-wrap">
-              <select
-                id="provider"
-                value={provider}
-                onChange={(event) => {
-                  providerChosen.current = true;
-                  setProvider(event.target.value);
-                }}
-                disabled={!bootstrap}
-              >
-                {bootstrap?.capabilities.providers.map((item) => (
-                  <option key={item.id} value={item.id}>
-                    {item.label}
-                    {!item.available ? " · 未配置" : ""}
-                  </option>
-                ))}
-              </select>
-              <ChevronDown size={13} />
-            </div>
-            {selectedProvider?.reason && (
-              <p className="field-hint provider-hint">
-                {selectedProvider.reason}
-              </p>
-            )}
-            {bootstrap &&
-              provider === "api" &&
-              !selectedProvider?.available && (
-                <p className="field-hint" role="status">
-                  API 尚未配置。请填写本地 <code>config/api.local.json</code> 的{" "}
-                  <code>base_url</code>、<code>model</code> 和{" "}
-                  <code>api_key</code>， 保存后刷新网页生效。
-                </p>
-              )}
+            <div className="api-fixed-provider"><span><Settings2 size={13} />API 生成</span><button type="button" onClick={() => setShowSettings(true)}>模型与密钥设置</button></div>
+            {bootstrap && !selectedProvider?.available && <p className="field-hint" role="status">API 尚未配置。请打开模型与密钥设置，选择模型并保存配置。</p>}
             <label className="field-label">本次任务</label>
             <div className="task-options">
               {Object.entries(kindLabels)
@@ -2327,6 +2260,9 @@ export default function App() {
                     先在大纲中提交审批并应用，再起草章节。
                   </p>
                 )}
+                <label className="field-label" htmlFor="draft-brief-mode">起草时的写前包</label>
+                <div className="select-wrap"><select id="draft-brief-mode" value={briefMode} onChange={(event) => setBriefMode(event.target.value as "compact" | "full")}><option value="compact">精简写前包</option><option value="full">完整写前包</option></select><ChevronDown size={13} /></div>
+                <p className="field-hint">起草时按所选模式重新整理最新材料；来源变化后会阻止发布旧结果。</p>
               </>
             )}
             <div className="context-card">
@@ -2369,7 +2305,7 @@ export default function App() {
               ) : (
                 <Play size={14} fill="currentColor" />
               )}
-              {provider === "codex" ? "准备 Codex 接力" : "开始任务"}
+              开始任务
               <ArrowRight size={15} />
             </button>
           </form>
@@ -2778,113 +2714,17 @@ export default function App() {
           </div>
         </Modal>
       )}
-      {handoff && (
-        <Modal
-          title={handoff.repair_candidate ? "修正规划 JSON" : "Codex 交互接力"}
-          subtitle={
-            handoff.repair_candidate
-              ? "修正结构、引用与出处后重新校验。此操作不调用模型。"
-              : "将上下文交给 Codex，完成后把候选结果带回这里。"
-          }
-          onClose={() => setHandoff(null)}
-          wide
-        >
-          <form
-            className="modal-form"
-            onSubmit={(event) => void completeHandoff(event)}
-          >
-            {handoff.repair_candidate && (
-              <div className="inline-error">
-                <CircleAlert size={15} />
-                {handoff.error || "规划结果未通过校验，请修正后回传。"}
-              </div>
-            )}
-            {!handoff.repair_candidate && (
-              <>
-                <div className="handoff-steps">
-                  <StepLabel number="1">复制任务上下文</StepLabel>
-                  <StepLabel number="2">在 Codex 中执行</StepLabel>
-                  <StepLabel number="3">回传候选结果</StepLabel>
-                </div>
-                <label>
-                  任务上下文
-                  <textarea
-                    readOnly
-                    value={
-                      handoff.handoff_prompt ||
-                      "上下文尚未返回，请刷新任务后再试。"
-                    }
-                    rows={7}
-                    className="prompt-text"
-                  />
-                </label>
-                <div className="inline-buttons">
-                  <button
-                    type="button"
-                    className="button secondary small"
-                    onClick={() => void copy(handoff.handoff_prompt || "")}
-                    disabled={!handoff.handoff_prompt}
-                  >
-                    <Copy size={14} />
-                    复制上下文
-                  </button>
-                  <button
-                    type="button"
-                    className="button secondary small"
-                    onClick={() =>
-                      download(
-                        `codex-task-${handoff.id}.md`,
-                        handoff.handoff_prompt || "",
-                      )
-                    }
-                    disabled={!handoff.handoff_prompt}
-                  >
-                    <Download size={14} />
-                    下载任务文件
-                  </button>
-                </div>
-              </>
-            )}
-            <label>
-              {handoff.kind === "build_blueprint"
-                ? "规划 JSON 候选"
-                : "回传候选正文"}
-              <textarea
-                value={candidate}
-                onChange={(event) => setCandidate(event.target.value)}
-                rows={9}
-                placeholder={
-                  handoff.kind === "build_blueprint"
-                    ? "粘贴完整规划 JSON，来源与结构将重新校验…"
-                    : "在这里粘贴 Codex 生成的完整 Markdown 结果…"
-                }
-                required
-              />
-            </label>
-            <div className="form-note">
-              <ShieldCheck size={14} />
-              回传只保存候选内容，不会直接更新正式章节或记忆。
-            </div>
-            <div className="modal-footer">
-              <button
-                type="button"
-                className="button secondary"
-                onClick={() => setHandoff(null)}
-              >
-                稍后回传
-              </button>
-              <button
-                type="submit"
-                className="button primary"
-                disabled={!!busy || !candidate.trim()}
-              >
-                <CornerDownLeft size={15} />
-                保存候选结果
-              </button>
-            </div>
+      {repairJob && repairJob.provider === "api" && repairJob.repair_candidate && (
+        <Modal title="修正规划 JSON" subtitle="修正结构、引用与出处后重新校验。此操作不调用模型。" onClose={() => setRepairJob(null)} wide>
+          <form className="modal-form" onSubmit={(event) => void completeRepairJob(event)}>
+            <div className="inline-error"><CircleAlert size={15} />{repairJob.error || "规划结果未通过校验，请修正后保存。"}</div>
+            <label>规划 JSON 候选<textarea value={candidate} onChange={(event) => setCandidate(event.target.value)} rows={14} placeholder="完整规划 JSON，来源与结构将重新校验…" required /></label>
+            <div className="form-note"><ShieldCheck size={14} />保存只更新候选规划，不会直接更新正式章节或记忆。</div>
+            <div className="modal-footer"><button type="button" className="button secondary" onClick={() => setRepairJob(null)}>稍后修复</button><button type="submit" className="button primary" disabled={!!busy || !candidate.trim()}><CornerDownLeft size={15} />保存修复结果</button></div>
           </form>
         </Modal>
       )}
+      {showSettings && <APISettings onClose={() => setShowSettings(false)} onSaved={async () => { const boot = await api<Bootstrap>("/bootstrap"); setBootstrap(boot); setToken(boot.csrf_token); }} />}
       {exportRange && (
         <Modal
           title="导出正式作品"

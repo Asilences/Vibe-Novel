@@ -141,9 +141,9 @@ class PlanningTaskTests(unittest.TestCase):
         self.assertEqual(provider.calls, 1)
         with self.assertRaises(VibeNovelError):
             manager.retry(self.project, job["id"])
-        still_invalid = manager.complete_handoff(self.project, job["id"], "bad JSON")
+        still_invalid = manager.repair_result(self.project, job["id"], "bad JSON")
         self.assertEqual(still_invalid["state"], "awaiting_input")
-        fixed = manager.complete_handoff(self.project, job["id"], json.dumps(blueprint_fixture()))
+        fixed = manager.repair_result(self.project, job["id"], json.dumps(blueprint_fixture()))
         self.assertEqual(fixed["state"], "succeeded", fixed)
         self.assertNotIn("repair_candidate", fixed)
         self.assertEqual(fixed["usage"], {"total_tokens": 37})
@@ -234,7 +234,7 @@ class PlanningTaskTests(unittest.TestCase):
         self.assertEqual(final["state"], "failed", final)
         self.assertNotIn("repair_candidate", final)
         with self.assertRaises(VibeNovelError):
-            manager.complete_handoff(self.project, job["id"], json.dumps(blueprint_fixture()))
+            manager.repair_result(self.project, job["id"], json.dumps(blueprint_fixture()))
 
     def test_derived_chapter_draft_uses_parent_characters_knowledge_and_style_as_future_planning(self):
         parent, plan = self.approved_derived_plan()
@@ -279,11 +279,11 @@ class PlanningTaskTests(unittest.TestCase):
             manager.submit(self.project, self.request(kind="draft", plan_path=plan["path"], plan_hash=plan["hash"]))
         self.assertEqual(provider.calls, 0)
 
-    def test_codex_and_explicit_crash_recovery_share_blueprint_validation(self):
-        manager, provider = self.manager()
-        job = manager.submit(self.project, self.request(provider="codex"))
+    def test_api_repair_and_explicit_crash_recovery_share_blueprint_validation(self):
+        manager, provider = self.manager("invalid")
+        job = manager.submit(self.project, self.request())
         self.assertEqual(self.wait(manager, job)["state"], "awaiting_input")
-        invalid = manager.complete_handoff(self.project, job["id"], "invalid")
+        invalid = manager.repair_result(self.project, job["id"], "invalid")
         self.assertEqual(invalid["state"], "awaiting_input")
         original = DocumentStore.save
         def disk_full(store, path, content, expected_hash, provenance="AUTHOR", **fields):
@@ -291,7 +291,7 @@ class PlanningTaskTests(unittest.TestCase):
                 raise OSError("disk full before candidate write")
             return original(store, path, content, expected_hash, provenance, **fields)
         with patch.object(DocumentStore, "save", disk_full), self.assertRaises(OSError):
-            manager.complete_handoff(self.project, job["id"], json.dumps(blueprint_fixture()))
+            manager.repair_result(self.project, job["id"], json.dumps(blueprint_fixture()))
         manager.close()
         from vibenovel.core.blueprints import prepare_blueprint
         with patch("vibenovel.core.blueprints.prepare_blueprint", wraps=prepare_blueprint) as validator:
@@ -300,7 +300,7 @@ class PlanningTaskTests(unittest.TestCase):
             final = recovered.recover_result(self.project, job["id"])
             self.assertGreaterEqual(validator.call_count, 3)
         self.assertEqual(final["state"], "succeeded", final)
-        self.assertEqual(provider.calls + provider2.calls, 0)
+        self.assertEqual(provider.calls + provider2.calls, 1)
         self.assertEqual(len(self.store.history(final["result_path"])), 1)
 
 

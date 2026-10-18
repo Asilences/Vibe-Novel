@@ -169,27 +169,17 @@ class StudioAPITests(unittest.TestCase):
         self.project.path("bible/new.md").write_text("外部修改", encoding="utf-8")
         self.assertEqual(self.write(self.base + "/approvals/" + stale["id"] + "/decision", {"decision": "approve"}).status_code, 409)
 
-    def test_codex_handoff_requires_plan_and_never_directly_changes_canon(self):
+    def test_retired_codex_and_handoff_route_are_unavailable(self):
         source = self.save(path="outlines/proposals/ch001.md", content="# 本章计划\n测试场景")
         request = {"kind": "draft", "provider": "codex", "document_path": source["path"],
                    "document_hash": source["hash"], "instruction": "按批准计划起草"}
         response = self.write(self.base + "/jobs", request)
-        self.assertEqual(response.status_code, 400)
-        plan = self.proposal("outlines/approved/ch001.md", source["content"])
-        self.apply(plan)
-        request["plan_path"] = "outlines/approved/ch001.md"
-        response = self.write(self.base + "/jobs", request)
-        self.assertEqual(response.status_code, 201, response.text)
-        job = response.json()
-        deadline = time.monotonic() + 5
-        while job["state"] in {"queued", "running"} and time.monotonic() < deadline:
-            time.sleep(0.02)
-            job = self.client.get(self.base + "/jobs/" + job["id"]).json()
-        self.assertEqual(job["state"], "awaiting_input")
-        self.assertIn("测试场景", job["handoff_prompt"])
-        result = self.write(self.base + "/jobs/" + job["id"] + "/complete", {"content": "# 第一章\n仅候选。"})
-        self.assertEqual(result.status_code, 200, result.text)
-        self.assertTrue(result.json()["result_path"].startswith("drafts/"))
+        self.assertEqual(response.status_code, 422)
+        capability = self.client.get("/api/bootstrap").json()["capabilities"]
+        self.assertEqual([item["id"] for item in capability["providers"]], ["api"])
+        self.assertEqual(capability["default_provider"], "api")
+        result = self.write(self.base + "/jobs/" + "a" * 32 + "/complete", {"content": "候选"})
+        self.assertEqual(result.status_code, 404)
         self.assertFalse(self.project.path("chapters/ch001.md").exists())
         self.assertEqual(self.client.get(self.base + "/world").json()["semantic_extraction"], "not_run")
 

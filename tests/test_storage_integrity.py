@@ -140,10 +140,14 @@ class StorageIntegrityTests(unittest.TestCase):
             path.write_bytes(json_bytes(altered))
             with self.subTest(field=field, value=value), self.assertRaises(VibeNovelError):
                 load_config(self.workspace)
-        altered = dict(DEFAULT_CONFIG, execution=dict(DEFAULT_CONFIG["execution"], mode="api"))
+        altered = dict(DEFAULT_CONFIG, execution=dict(DEFAULT_CONFIG["execution"], mode="autonomous"))
         path.write_bytes(json_bytes(altered))
         with self.assertRaises(VibeNovelError):
             load_config(self.workspace)
+        for mode in ("api", "codex_interactive"):
+            altered = dict(DEFAULT_CONFIG, execution=dict(DEFAULT_CONFIG["execution"], mode=mode))
+            path.write_bytes(json_bytes(altered))
+            self.assertEqual(load_config(self.workspace)["execution"]["mode"], "api")
 
     def test_source_size_limit_and_empty_final_chapters_fail_without_outputs(self):
         with self.assertRaises(VibeNovelError):

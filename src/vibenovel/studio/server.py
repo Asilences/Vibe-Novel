@@ -17,7 +17,7 @@ from typing import Literal, Optional
 from urllib.parse import urlsplit
 from uuid import uuid4
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Query
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -26,6 +26,8 @@ from pydantic import BaseModel, ConfigDict, Field, StrictStr
 from vibenovel import __version__
 from vibenovel.config import load_config
 from vibenovel.core.approvals import ApprovalStore
+from vibenovel.core.analysis import AnalysisStore
+from vibenovel.core.briefs import ChapterBriefStore
 from vibenovel.core.blueprints import PlanningStore
 from vibenovel.core.documents import ConflictError, DocumentStore, canonical_read
 from vibenovel.core.export import export_markdown
@@ -34,6 +36,7 @@ from vibenovel.core.imports import import_outline, verify_bundle, verify_project
 from vibenovel.core.project import ProjectStore
 from vibenovel.errors import MissingDocumentError, VibeNovelError
 from .jobs import JobManager
+from .settings import public_settings, save_settings
 
 MAX_REQUEST_BYTES = 15 * 1024 * 1024
 LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
@@ -82,7 +85,7 @@ class Decision(Input):
 
 class JobRequest(Input):
     kind: Literal["expand_outline", "draft", "review", "rewrite", "build_blueprint"]
-    provider: Literal["codex", "api"]
+    provider: Literal["api"] = "api"
     document_path: StrictStr
     document_hash: StrictStr
     instruction: StrictStr = Field(default="", max_length=12000)
@@ -90,6 +93,7 @@ class JobRequest(Input):
     plan_hash: Optional[StrictStr] = None
     planning_start: Optional[int] = Field(default=None, ge=1, le=999999)
     planning_count: Optional[int] = Field(default=None, ge=1, le=10)
+    brief_mode: Optional[Literal["compact", "full"]] = None
 
 
 class PlanningProposal(Input):
@@ -98,8 +102,49 @@ class PlanningProposal(Input):
     chapter_id: Optional[StrictStr] = None
 
 
-class HandoffResult(Input):
+class RepairResult(Input):
     content: StrictStr
+
+
+class APISettings(Input):
+    base_url: StrictStr = Field(max_length=4096)
+    model: StrictStr = Field(max_length=500)
+    api_key: StrictStr = Field(default="", max_length=16384)
+    clear_api_key: bool = False
+    allow_loopback: bool = False
+
+
+class SaveSettings(Input):
+    expected_hash: Optional[StrictStr]
+    api: APISettings
+
+
+class AnalysisSample(Input):
+    path: StrictStr
+    hash: StrictStr
+
+
+class SaveBaseline(Input):
+    samples: list[AnalysisSample] = Field(max_length=10)
+    expected_hash: Optional[StrictStr]
+
+
+class AnalyzeDocument(Input):
+    path: StrictStr
+    expected_hash: StrictStr
+
+
+class MarkIssue(Input):
+    report_path: StrictStr
+    report_hash: StrictStr
+    issue_id: StrictStr
+    status: Literal["pending", "resolved", "ignored"]
+
+
+class BuildBrief(Input):
+    plan_path: StrictStr
+    expected_hash: StrictStr
+    mode: Literal["compact", "full"] = "compact"
 
 
 class ExportRequest(Input):
@@ -231,18 +276,27 @@ def create_app(workspace: Path, *, frontend_dir: Optional[Path] = None, job_mana
 
     @app.exception_handler(RequestValidationError)
     async def bad_request(request, exc):
+        if request.url.path == "/api/settings":
+            return JSONResponse({"detail": "API 设置请求字段无效；请检查地址、模型、密钥和配置版本"}, status_code=422)
         fields = ", ".join(".".join(str(item) for item in error["loc"]) for error in exc.errors())
         return JSONResponse({"detail": "请求字段无效: " + fields}, status_code=422)
 
     @app.get("/api/bootstrap")
     def bootstrap():
         capability = jobs.capabilities()
-        providers = [dict(capability[name], id=name, label=label) for name, label in (
-            ("codex", "Codex · 交互接力"), ("api", "API · 自动生成"))]
+        providers = [dict(capability["api"], id="api", label="API · 自动生成")]
         return {"version": __version__, "csrf_token": token, "capabilities": {
             "default_provider": capability.get("default_provider", "api"),
             "providers": providers, "tasks": ["expand_outline", "draft", "review", "rewrite", "build_blueprint"],
             "limits": capability.get("limits", {})}}
+
+    @app.get("/api/settings")
+    def api_settings():
+        return public_settings(store.workspace)
+
+    @app.put("/api/settings")
+    def update_api_settings(body: SaveSettings):
+        return save_settings(store.workspace, body.api.model_dump(), body.expected_hash)
 
     def consistent_status(project):
         with canonical_read(project):
@@ -374,9 +428,9 @@ def create_app(workspace: Path, *, frontend_dir: Optional[Path] = None, job_mana
     def retry_job(novel_id: str, job_id: str):
         return jobs.retry(store.get(novel_id), job_id)
 
-    @app.post("/api/projects/{novel_id}/jobs/{job_id}/complete")
-    def complete_handoff(novel_id: str, job_id: str, body: HandoffResult):
-        return jobs.complete_handoff(store.get(novel_id), job_id, body.content)
+    @app.post("/api/projects/{novel_id}/jobs/{job_id}/repair")
+    def repair_result(novel_id: str, job_id: str, body: RepairResult):
+        return jobs.repair_result(store.get(novel_id), job_id, body.content)
 
     @app.post("/api/projects/{novel_id}/jobs/{job_id}/recover")
     def recover_result(novel_id: str, job_id: str):
@@ -415,6 +469,37 @@ def create_app(workspace: Path, *, frontend_dir: Optional[Path] = None, job_mana
     @app.post("/api/projects/{novel_id}/planning/proposal", status_code=201)
     def planning_proposal(novel_id: str, body: PlanningProposal):
         return PlanningStore(store.get(novel_id)).propose(body.path, body.expected_hash, body.chapter_id)
+
+    @app.get("/api/projects/{novel_id}/analysis/baseline")
+    def style_baseline(novel_id: str):
+        return AnalysisStore(store.get(novel_id)).baseline()
+
+    @app.put("/api/projects/{novel_id}/analysis/baseline")
+    def save_style_baseline(novel_id: str, body: SaveBaseline):
+        return AnalysisStore(store.get(novel_id)).set_baseline(
+            [sample.model_dump() for sample in body.samples], body.expected_hash)
+
+    @app.post("/api/projects/{novel_id}/analysis/reports", status_code=201)
+    def analyze_document(novel_id: str, body: AnalyzeDocument):
+        return AnalysisStore(store.get(novel_id)).analyze(body.path, body.expected_hash)
+
+    @app.get("/api/projects/{novel_id}/analysis/report")
+    def analysis_report(novel_id: str, path: str):
+        return AnalysisStore(store.get(novel_id)).report(path)
+
+    @app.post("/api/projects/{novel_id}/analysis/mark")
+    def mark_analysis_issue(novel_id: str, body: MarkIssue):
+        return AnalysisStore(store.get(novel_id)).mark(
+            body.report_path, body.report_hash, body.issue_id, body.status)
+
+    @app.get("/api/projects/{novel_id}/analysis/search")
+    def search_history(novel_id: str, query: str = Query(min_length=1, max_length=200),
+                       limit: int = Query(default=10, ge=1, le=20)):
+        return AnalysisStore(store.get(novel_id)).search(query, limit)
+
+    @app.post("/api/projects/{novel_id}/analysis/brief")
+    def chapter_brief(novel_id: str, body: BuildBrief):
+        return ChapterBriefStore(store.get(novel_id)).build(body.plan_path, body.expected_hash, body.mode)
 
     if frontend.is_dir():
         assets = safe_path(frontend, "assets")

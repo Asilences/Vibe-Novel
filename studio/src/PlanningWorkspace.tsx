@@ -47,8 +47,7 @@ type Props = {
   project: Project;
   documents: DocumentItem[];
   providers: Provider[];
-  provider: string;
-  onProvider: (id: string) => void;
+  onSettings: () => void;
   jobs: Job[];
   approvals: Approval[];
   onJob: (job: Job) => void;
@@ -330,8 +329,7 @@ export default function PlanningWorkspace({
   project,
   documents,
   providers,
-  provider,
-  onProvider,
+  onSettings,
   jobs,
   approvals,
   onJob,
@@ -379,7 +377,7 @@ export default function PlanningWorkspace({
     [documents],
   );
   const source = sources.find((item) => item.path === sourcePath);
-  const selectedProvider = providers.find((item) => item.id === provider);
+  const selectedProvider = providers.find((item) => item.id === "api");
   const blueprintJobs = jobs.filter((job) => job.kind === "build_blueprint");
   const latestJob = blueprintJobs[0];
   const jobSignature = blueprintJobs
@@ -500,7 +498,7 @@ export default function PlanningWorkspace({
     try {
       const job = await api<Job>(`${base}/jobs`, "POST", {
         kind: "build_blueprint",
-        provider,
+        provider: "api",
         document_path: source.path,
         document_hash: source.hash,
         planning_start: start,
@@ -624,18 +622,7 @@ export default function PlanningWorkspace({
             </label>
             <label className="planning-field">
               执行方式
-              <select
-                value={provider}
-                onChange={(event) => onProvider(event.target.value)}
-                disabled={!!busy}
-              >
-                {providers.map((item) => (
-                  <option value={item.id} key={item.id}>
-                    {item.label}
-                    {!item.available ? " · 未配置" : ""}
-                  </option>
-                ))}
-              </select>
+              <div className="api-fixed-provider"><span>API 生成</span><button type="button" onClick={onSettings}>模型设置</button></div>
             </label>
             <label className="planning-field">
               起始章节
@@ -680,11 +667,9 @@ export default function PlanningWorkspace({
               disabled={!!busy}
             />
           </label>
-          {provider === "api" && !selectedProvider?.available && (
+          {!selectedProvider?.available && (
             <p className="planning-api-note">
-              请填写本地 <code>config/api.local.json</code> 的{" "}
-              <code>base_url</code>、<code>model</code>、<code>api_key</code>
-              ，保存后刷新网页生效。
+              API 尚未配置。请在“模型设置”中选择模型并填写密钥，保存后再开始生成。
             </p>
           )}
           <div className="planning-generation-actions">
@@ -720,7 +705,7 @@ export default function PlanningWorkspace({
               ) : (
                 <Sparkles size={14} />
               )}
-              {provider === "codex" ? "准备规划接力" : "生成创作规划"}
+              生成创作规划
               <ArrowRight size={13} />
             </button>
           </div>
@@ -742,7 +727,7 @@ export default function PlanningWorkspace({
               {latestJob.error ||
                 (latestJob.result_path
                   ? "规划候选已生成，可在下方选择查看"
-                  : "打开任务记录，查看接力、执行日志与候选结果")}
+                  : "打开任务记录，查看执行日志与候选结果")}
             </span>
             <ArrowUpRight size={14} />
           </button>
