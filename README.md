@@ -89,7 +89,7 @@ vibenovel --workspace /path/to/workspace list
 python -m vibenovel --help
 ```
 
-安装构建需 setuptools；运行核心仅用标准库。`--workspace` 放在子命令之前，默认当前目录，目录必须已经存在。配置读取该工作目录的 `config/app.json`，不存在则采用相同默认值。未知版本、未知字段或当前不支持的 API 模式均报错；不会静默忽略。
+安装构建需 setuptools；运行核心仅用标准库。`--workspace` 放在子命令之前，默认当前目录，目录必须已经存在。CLI 配置读取该工作目录的 `config/app.json`，不存在则采用相同默认值；其中 `execution.mode` 暂只支持 `interactive`。未知版本、未知字段或不支持的模式均报错；不会静默忽略。Studio 的 API 任务使用前述环境变量配置。
 
 ```bash
 python tools/vibenovel.py config
