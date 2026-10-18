@@ -27,5 +27,5 @@ studio/dist/
 *.tsbuildinfo
 .studio-cache/
 
-# Studio API credentials stay on this computer
+# Studio API and GitHub credentials stay on this computer
 /config/*.local.json*

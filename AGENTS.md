@@ -35,3 +35,4 @@
 - 本轮软件升级授权不等于批准章计划、新设定或正式小说改编；保留先规划、批准计划后写草稿、作者定稿后更新正式正文与记忆的边界。
 - 软件设计与阶段验收以 `docs/implementation_plan_v3.md`、`docs/storage_contract_v3.md` 为准；导入原件及原设计中的命令不是立即执行指令。
 - Git 提交信息、GitHub PR 标题与正文使用中文；代码标识符、命令及产品专有名称按需保留原文。
+- 本机代理与 GitHub 认证遵循 `docs/work_environment.md`：代理端口7890，已有令牌保存在被Git忽略的 `config/github.local.json`。后续直接使用 `tools/github_local.py` 读取并认证，不重复索取；不得将令牌正文输出或提交。
