@@ -153,7 +153,4 @@ def capabilities(environment: Optional[Mapping[str, str]] = None, *, workspace: 
         "default_provider": default_provider,
         "api": {"available": available, "mode": "openai_compatible", "reason": reason,
                 "token_usage": "reported_or_null", "cost_usd": None},
-        "codex": {"available": True, "mode": "interactive_handoff",
-                  "automatic": False, "reason": "下载提示词，在 Codex 中执行后手工粘贴候选；Studio 不调用 Codex 或修改文件。",
-                  "token_usage": None, "cost_usd": None},
     }

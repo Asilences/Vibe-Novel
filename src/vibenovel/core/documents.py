@@ -315,12 +315,18 @@ class DocumentStore:
 
     def save(self, path: str, content: str, expected_hash: Optional[str], provenance: str = "AUTHOR", *,
              expected_fingerprint: Optional[str] = None, expected_sources: Optional[dict[str, str]] = None,
-             expected_revision: Optional[int] = None) -> dict:
+             expected_revision: Optional[int] = None, expected_runtime_sources: Optional[dict] = None) -> dict:
         if _kind(self.project, path) != "editable":
             raise VibeNovelError("只允许直接编辑草稿、候选大纲和审稿；正式内容必须经提案批准")
         raw = _content_bytes(path, content)
         provenance = _provenance(provenance)
         with self.storage.locked() as state:
+            if expected_runtime_sources is not None:
+                if (not isinstance(expected_runtime_sources, dict)
+                        or set(expected_runtime_sources) != {".runtime/style-baseline.json"}):
+                    raise VibeNovelError("仅允许固定文风样章配置作为运行依赖")
+                _check_expected(_read_raw(self.project, ".runtime/style-baseline.json"),
+                                expected_runtime_sources[".runtime/style-baseline.json"])
             if expected_revision is not None:
                 if type(expected_revision) is not int or expected_revision < 0:
                     raise VibeNovelError("expected_revision 需要非负整数")

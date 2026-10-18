@@ -16,7 +16,7 @@ export type Bootstrap = {
   capabilities: {
     providers: Provider[];
     tasks?: unknown[];
-    default_provider?: "api" | "codex";
+    default_provider?: "api";
   };
 };
 export type DocumentItem = {
@@ -40,6 +40,7 @@ export type Approval = {
   target: string;
   before: string | null;
   after: string;
+  after_hash?: string;
   reason: string;
   impact: string[];
   state: string;
@@ -58,7 +59,6 @@ export type Job = {
   logs?: Array<string | Record<string, unknown>>;
   usage?: Record<string, unknown> | null;
   cost_usd?: number | null;
-  handoff_prompt?: string;
   context_sources?: Record<string, string>;
   recovery_available?: boolean;
   recovery_candidate?: string;
@@ -155,6 +155,68 @@ export type PlanningPackage = {
 };
 export type PlanningPackageSummary = Omit<PlanningPackage, "content" | "data">;
 
+export type AnalysisMetrics = Record<string, number>;
+export type StyleBaseline = {
+  novel_id: string;
+  configured: boolean;
+  path: string;
+  hash: string | null;
+  config_hash: string | null;
+  samples: { path: string; hash: string; current_hash: string | null; stale: boolean }[];
+  metrics: AnalysisMetrics | null;
+  stale: boolean;
+  limitations: string[];
+};
+export type AnalysisIssue = {
+  id: string;
+  rule: string;
+  severity: string;
+  start_line: number;
+  end_line: number;
+  quote: string;
+  message: string;
+  suggestion: string;
+  status: "pending" | "resolved" | "ignored";
+};
+export type AnalysisReport = {
+  id: string;
+  novel_id: string;
+  path: string;
+  hash: string;
+  source: { path: string; hash: string; current_hash: string | null };
+  dependencies?: Record<string, string>;
+  stale: boolean;
+  stale_reasons: string[];
+  metrics: AnalysisMetrics;
+  baseline: Record<string, unknown> | null;
+  issues: AnalysisIssue[];
+  coverage: Record<string, unknown>;
+  limitations: string[];
+};
+export type AnalysisSearch = {
+  results: { path: string; hash: string; start_line: number; end_line: number; quote: string; score: number }[];
+  scanned: number;
+  omitted: unknown[];
+  limitations: string[];
+};
+export type ChapterBrief = {
+  sections: { id: string; label: string; status: string; paths: string[]; content: string; truncated?: boolean }[];
+  sources: Record<string, string>;
+  missing: { id: string; label: string; paths: string[]; reason: string }[];
+  omitted: { id: string; label: string; paths: string[]; reason: string }[];
+  limitations: string[];
+  text: string;
+  chapter?: number;
+  budget?: { characters: number; limit: number };
+};
+export type APISettingsData = {
+  hash: string | null;
+  default_provider: "api";
+  api: { base_url: string; model: string; has_api_key: boolean; allow_loopback: boolean };
+  environment_overrides: string[];
+  presets: { id: string; label: string; base_url: string; models: { id: string; label: string }[] }[];
+};
+
 let token = "";
 export const setToken = (value: string) => {
   token = value;
@@ -230,7 +292,7 @@ export const stateLabels: Record<string, string> = {
   applied: "已应用",
   queued: "排队中",
   running: "执行中",
-  awaiting_input: "等待接力结果",
+  awaiting_input: "等待修复结果",
   succeeded: "已完成",
   completed: "已完成",
   failed: "执行失败",

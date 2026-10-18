@@ -45,7 +45,7 @@ class LocalSettingsTests(unittest.TestCase):
             state = capabilities({}, workspace=self.workspace)
             self.assertEqual(state["default_provider"], "api")
             self.assertFalse(state["api"]["available"])
-            self.assertTrue(state["codex"]["available"])
+            self.assertNotIn("codex", state)
         self.write(self.config(base_url=""))
         self.assertFalse(capabilities({}, workspace=self.workspace)["api"]["available"])
 
