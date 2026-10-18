@@ -144,7 +144,8 @@ export default function App() {
   const [selectedApproval, setSelectedApproval] = useState("");
   const [proposalTab, setProposalTab] = useState<"diff" | "after">("diff");
   const [decisionNote, setDecisionNote] = useState("");
-  const [provider, setProvider] = useState("codex");
+  const [provider, setProvider] = useState("api");
+  const providerChosen = useRef(false);
   const [taskKind, setTaskKind] = useState("expand_outline");
   const [instruction, setInstruction] = useState("");
   const [planPath, setPlanPath] = useState("");
@@ -215,10 +216,9 @@ export default function App() {
       setBootstrap(boot);
       setToken(boot.csrf_token);
       setProjects(list.projects);
-      const firstAvailable = boot.capabilities.providers.find(
-        (item) => item.available,
-      );
-      if (firstAvailable) setProvider(firstAvailable.id);
+      if (!providerChosen.current) {
+        setProvider(boot.capabilities.default_provider || "api");
+      }
       setReady(true);
     } catch (error) {
       setFatal(errorText(error));
@@ -706,7 +706,7 @@ export default function App() {
   }
   async function startTask(event: FormEvent) {
     event.preventDefault();
-    if (!project || !doc) return;
+    if (!project || !doc || !selectedProvider?.available || busy) return;
     if (dirty) {
       notify("请先保存当前文稿，让任务使用明确的已保存版本。", "error");
       return;
@@ -2088,15 +2088,14 @@ export default function App() {
               <select
                 id="provider"
                 value={provider}
-                onChange={(event) => setProvider(event.target.value)}
+                onChange={(event) => {
+                  providerChosen.current = true;
+                  setProvider(event.target.value);
+                }}
                 disabled={!bootstrap}
               >
                 {bootstrap?.capabilities.providers.map((item) => (
-                  <option
-                    key={item.id}
-                    value={item.id}
-                    disabled={!item.available}
-                  >
+                  <option key={item.id} value={item.id}>
                     {item.label}
                     {!item.available ? " · 未配置" : ""}
                   </option>
@@ -2107,6 +2106,13 @@ export default function App() {
             {selectedProvider?.reason && (
               <p className="field-hint provider-hint">
                 {selectedProvider.reason}
+              </p>
+            )}
+            {bootstrap && provider === "api" && !selectedProvider?.available && (
+              <p className="field-hint" role="status">
+                API 尚未配置。请填写本地 <code>config/api.local.json</code> 的{" "}
+                <code>base_url</code>、<code>model</code> 和 <code>api_key</code>，
+                保存后刷新网页生效。
               </p>
             )}
             <label className="field-label">本次任务</label>

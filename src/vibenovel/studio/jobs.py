@@ -75,7 +75,7 @@ class JobManager:
             raise VibeNovelError("任务并发需要 1–8")
         self.workspace = Path(workspace).resolve()
         self._projects = ProjectStore(self.workspace)
-        self._factory = provider_factory or (lambda provider: OpenAICompatibleProvider())
+        self._factory = provider_factory or (lambda provider: OpenAICompatibleProvider(workspace=self.workspace))
         self._max_pending = max_pending
         self._concurrency = concurrency
         self._lock = threading.RLock()
@@ -285,7 +285,7 @@ class JobManager:
                 thread.join(timeout=1)
 
     def capabilities(self):
-        result = provider_capabilities()
+        result = provider_capabilities(workspace=self.workspace)
         result["limits"] = {"max_pending": self._max_pending, "concurrency": self._concurrency}
         return result
 

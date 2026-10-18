@@ -26,9 +26,35 @@ cd ..
 
 已保存状态和任务都在本地。关闭网页不会停止后端任务；停止后端会中断正在请求的任务，重启后需要明确重试，不自动重复付费调用。排队任务可以暂停/继续，运行任务暂停后转为中断。已返回但尚未发布的候选提供“恢复已生成候选”，不会再次调用模型。
 
-## 配置 API（可选）
+## 配置 API
 
-在启动后端的 PowerShell 设置环境变量，然后运行 Studio；不设置时可用离线编辑和 Codex 接力：
+Studio 默认选择 API；未配置时保留 API 模式并提示填写，不会自动切换到 Codex。首次将 `config/api.example.json` 复制为 **`config/api.local.json`**，在本地编辑。示例预置 DeepSeek，只需填入该服务商的 API key：
+
+```json
+{
+  "default_provider": "api",
+  "api": {
+    "base_url": "https://api.deepseek.com",
+    "model": "deepseek-flash",
+    "api_key": ""
+  }
+}
+```
+
+换服务商时填写对应的 OpenAI 兼容 Base URL、实际模型 ID 和 API key。文件使用 UTF-8，JSON 不支持注释；请保留双引号。保存后刷新 Studio 网页即可生效，无需重启后端；只修改密钥不会自动发起请求。密钥文件及其备份已加入 `.gitignore`，不要把真实密钥填入会上传的 `api.example.json`。执行方式仍可手动选择 Codex 接力。
+
+以下为 2026-10-18 核实的普通按量 API 填写示例，实际权限和模型 ID 以各自控制台为准：
+
+| 厂商 | `base_url` | `model` 示例或填写方式 |
+| --- | --- | --- |
+| [DeepSeek](https://api-docs.deepseek.com/zh-cn/) | `https://api.deepseek.com` | `deepseek-flash`；也可按已开通模型改为 `deepseek-v4-pro` |
+| [小米 MiMo](https://mimo.mi.com/static/docs/quick-start/summary/first-api-call.md) | `https://api.xiaomimimo.com/v1` | `mimo-v2.6-pro` 或 `mimo-v2.6-flash` |
+| [智谱 GLM](https://docs.bigmodel.cn/cn/guide/develop/openai/introduction) | `https://open.bigmodel.cn/api/paas/v4` | 例如 `glm-5.3`，按实际开通模型填写 |
+| [豆包 / 火山方舟](https://github.com/volcengine/volcengine-python-sdk/blob/master/volcenginesdkexamples/volcenginesdkarkruntime/completions.py) | `https://ark.cn-beijing.volces.com/api/v3` | 复制控制台调用示例中的 `model`，通常为 `ep-…` 推理接入点 ID |
+
+应用自动追加 `/chat/completions`。这几家共用同一适配器，已测试兼容协议；本次未调用其真实付费服务。上表使用普通按量地址；MiMo Token Plan、GLM Coding Plan 等套餐可能有专用地址、密钥和使用范围，请以对应套餐官方说明为准，不混用套餐与按量密钥。
+
+也兼容启动后端前设置环境变量，**环境变量按字段优先于 JSON**；若本地文件修改未生效，先检查是否仍设置了对应环境变量：
 
 ```powershell
 $env:VIBENOVEL_API_BASE = 'https://你的兼容接口/v1'
@@ -40,7 +66,7 @@ $env:VIBENOVEL_API_KEY = [System.Net.NetworkCredential]::new('', $studioApiKey).
 Remove-Item Env:VIBENOVEL_API_KEY
 ```
 
-支持 OpenAI 兼容 `chat/completions`，不保证每个服务商所有扩展参数兼容。仅点击开始任务才调用；返回文本只保存到候选或审稿文件，不提供模型文件/Shell 工具。外部接口要求 HTTPS；本地兼容服务须显式设置 `VIBENOVEL_ALLOW_LOOPBACK_API=1`。usage 仅展示服务商实际返回值，无报价时成本未知。API key 不发往浏览器或写入任务记录。
+支持 OpenAI 兼容 `chat/completions`，不保证每个服务商所有扩展参数兼容。仅点击开始任务才调用；返回文本只保存到候选或审稿文件，不提供模型文件/Shell 工具。外部接口要求 HTTPS；本地兼容服务须在 JSON 的 `api` 对象增加 `"allow_loopback": true`，或设置 `VIBENOVEL_ALLOW_LOOPBACK_API=1`。usage 仅展示服务商实际返回值，无报价时成本未知。API key 只由后端读取，不发往浏览器或写入任务记录。更换服务商时同时更换地址、模型和对应密钥。
 
 服务只监听本机，限制 Host/Origin、变更请求令牌和文档路径；这是单用户本地工作流，不是对同权限本机进程的人类身份认证或安全沙箱。不要将服务反向代理到公网。开发时 `npm run dev` 代理 `/api` 到 8000，使用同一台电脑访问；正式使用推荐前后端同源构建模式。
 
@@ -89,7 +115,7 @@ vibenovel --workspace /path/to/workspace list
 python -m vibenovel --help
 ```
 
-安装构建需 setuptools；运行核心仅用标准库。`--workspace` 放在子命令之前，默认当前目录，目录必须已经存在。CLI 配置读取该工作目录的 `config/app.json`，不存在则采用相同默认值；其中 `execution.mode` 暂只支持 `interactive`。未知版本、未知字段或不支持的模式均报错；不会静默忽略。Studio 的 API 任务使用前述环境变量配置。
+安装构建需 setuptools；运行核心仅用标准库。`--workspace` 放在子命令之前，默认当前目录，目录必须已经存在。CLI 配置读取该工作目录的 `config/app.json`，不存在则采用相同默认值；其中 `execution.mode` 暂只支持 `codex_interactive`。未知版本、未知字段或不支持的模式均报错；不会静默忽略。Studio 的 API 任务使用前述本地 JSON 或环境变量配置。
 
 ```bash
 python tools/vibenovel.py config
