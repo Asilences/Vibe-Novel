@@ -16,7 +16,9 @@ class ProjectBoundaryTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
-        self.workspace = Path(temporary.name)
+        # Windows runners may expose TEMP through an 8.3 alias (RUNNER~1).
+        # Compare canonical locations, matching the store's workspace boundary.
+        self.workspace = Path(temporary.name).resolve()
         self.store = ProjectStore(self.workspace)
 
     def test_init_is_isolated_and_never_migrates_v2_canon(self):
