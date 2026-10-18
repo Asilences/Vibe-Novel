@@ -8,4 +8,17 @@ __pycache__/
 
 # Generated temporary chapter context
 context_ch*.md
-__pycache__/
+
+# v3 build output, local secrets and resumable runtime data
+build/
+dist/
+.runtime-build/
+*.egg-info/
+.env
+.env.*
+!.env.example
+**/.runtime/
+**/.init-*/
+**/.import-*/
+**/.write-*
+.pytest_cache/

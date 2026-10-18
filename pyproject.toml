@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vibenovel"
+version = "3.0.0a1"
+description = "Local-first novel workspace: v3 M0 foundation"
+requires-python = ">=3.9"
+dependencies = []
+
+[project.scripts]
+vibenovel = "vibenovel.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

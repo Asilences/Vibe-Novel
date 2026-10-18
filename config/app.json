@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "execution": {
+    "mode": "codex_interactive",
+    "approval_policy": "human_for_L3",
+    "plan_approval": "per_chapter",
+    "default_max_draft_chapters": 1
+  },
+  "imports": {
+    "max_bytes": 10485760
+  }
+}
