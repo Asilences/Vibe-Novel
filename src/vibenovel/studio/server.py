@@ -34,6 +34,9 @@ from vibenovel.core.export import export_markdown
 from vibenovel.core.files import cleanup_stage, safe_path
 from vibenovel.core.imports import import_outline, verify_bundle, verify_project
 from vibenovel.core.project import ProjectStore
+from vibenovel.core.toolkit import WritingToolkitStore
+from vibenovel.core.semantic import SemanticStore
+from vibenovel.core.diagnostics import WritingDiagnosticsStore
 from vibenovel.errors import MissingDocumentError, VibeNovelError
 from .jobs import JobManager
 from .settings import public_settings, save_settings
@@ -145,6 +148,26 @@ class BuildBrief(Input):
     plan_path: StrictStr
     expected_hash: StrictStr
     mode: Literal["compact", "full"] = "compact"
+    document_path: Optional[StrictStr] = None
+    document_hash: Optional[StrictStr] = None
+
+
+class VerifyAnalysis(Input):
+    report_path: StrictStr
+    report_hash: StrictStr
+
+
+class SaveToolkit(Input):
+    expected_hash: Optional[StrictStr]
+    lexicon: list[dict] = Field(max_length=200)
+    characters: list[dict] = Field(max_length=200)
+    threads: list[dict] = Field(max_length=200)
+    style: dict
+
+
+class SemanticQuery(Input):
+    query: StrictStr = Field(min_length=1, max_length=200)
+    limit: int = Field(default=10, ge=1, le=20)
 
 
 class ExportRequest(Input):
@@ -299,8 +322,8 @@ def create_app(workspace: Path, *, frontend_dir: Optional[Path] = None, job_mana
         return save_settings(store.workspace, body.api.model_dump(), body.expected_hash)
 
     def consistent_status(project):
-        with canonical_read(project):
-            return project.status()
+        with canonical_read(project) as snapshot:
+            return dict(project.status(), canonical_revision=snapshot["revision"])
 
     @app.get("/api/projects")
     def projects():
@@ -317,7 +340,7 @@ def create_app(workspace: Path, *, frontend_dir: Optional[Path] = None, job_mana
         status = consistent_status(project)
         status.update(phase="Studio alpha", finalize_available=False,
                       single_file_approval_available=True)
-        return {"project": project.metadata, "status": status}
+        return {"project": dict(project.metadata, canonical_revision=status["canonical_revision"]), "status": status}
 
     @app.get("/api/projects/{novel_id}/documents")
     def documents(novel_id: str):
@@ -492,6 +515,38 @@ def create_app(workspace: Path, *, frontend_dir: Optional[Path] = None, job_mana
         return AnalysisStore(store.get(novel_id)).mark(
             body.report_path, body.report_hash, body.issue_id, body.status)
 
+    @app.post("/api/projects/{novel_id}/analysis/verify")
+    def verify_analysis(novel_id: str, body: VerifyAnalysis):
+        return AnalysisStore(store.get(novel_id)).verify(body.report_path, body.report_hash)
+
+    @app.get("/api/projects/{novel_id}/analysis/toolkit")
+    def writing_toolkit(novel_id: str):
+        return WritingToolkitStore(store.get(novel_id)).settings()
+
+    @app.put("/api/projects/{novel_id}/analysis/toolkit")
+    def save_writing_toolkit(novel_id: str, body: SaveToolkit):
+        return WritingToolkitStore(store.get(novel_id)).save(
+            body.model_dump(exclude={"expected_hash"}), body.expected_hash)
+
+    @app.get("/api/projects/{novel_id}/analysis/structure")
+    def story_structure(novel_id: str):
+        return WritingToolkitStore(store.get(novel_id)).structure()
+
+    @app.get("/api/projects/{novel_id}/analysis/diagnostics")
+    def writing_diagnostics(novel_id: str):
+        return WritingDiagnosticsStore(store.get(novel_id)).report()
+
+    @app.get("/api/projects/{novel_id}/analysis/semantic/status")
+    def semantic_status(novel_id: str):
+        return SemanticStore(store.get(novel_id), store.workspace).status()
+
+    @app.post("/api/projects/{novel_id}/analysis/semantic/search")
+    def semantic_search(novel_id: str, body: SemanticQuery):
+        semantic = SemanticStore(store.get(novel_id), store.workspace)
+        if not semantic.status()["available"]:
+            raise ConflictError(semantic.status()["reason"])
+        return semantic.search(body.query, body.limit)
+
     @app.get("/api/projects/{novel_id}/analysis/search")
     def search_history(novel_id: str, query: str = Query(min_length=1, max_length=200),
                        limit: int = Query(default=10, ge=1, le=20)):
@@ -499,7 +554,9 @@ def create_app(workspace: Path, *, frontend_dir: Optional[Path] = None, job_mana
 
     @app.post("/api/projects/{novel_id}/analysis/brief")
     def chapter_brief(novel_id: str, body: BuildBrief):
-        return ChapterBriefStore(store.get(novel_id)).build(body.plan_path, body.expected_hash, body.mode)
+        return ChapterBriefStore(store.get(novel_id)).build(body.plan_path, body.expected_hash, body.mode,
+                                                          document_path=body.document_path,
+                                                          document_hash=body.document_hash)
 
     if frontend.is_dir():
         assets = safe_path(frontend, "assets")

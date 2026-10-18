@@ -342,11 +342,12 @@ export default function App() {
     navigate = true,
     discard = false,
     line?: number,
+    expectedHash?: string,
   ) {
     if (!project || ((path !== doc?.path || discard) && !allowLeave())) return;
     if (path === doc?.path && dirty && !discard) return;
     if (
-      /^outlines\/(approved|proposals)\/blueprint(?:-[a-z0-9]+)?\.json$/.test(
+      !expectedHash && /^outlines\/(approved|proposals)\/blueprint(?:-[a-z0-9]+)?\.json$/.test(
         path,
       )
     ) {
@@ -363,11 +364,20 @@ export default function App() {
       );
       if (currentProject.current !== id || request !== docRequest.current)
         return;
+      if (expectedHash && result.hash !== expectedHash) {
+        notify("来源版本已变化，已停止按旧行号定位。请返回写作检查重新分析或检索。", "error");
+        return;
+      }
       if (sourceRef.current !== sourceAtStart) {
         notify(
           "加载期间文稿有了新修改，已保留当前文字。保存后再打开目标文件。",
           "error",
         );
+        return;
+      }
+      if (/^outlines\/(approved|proposals)\/blueprint(?:-[a-z0-9]+)?\.json$/.test(path)) {
+        setPlanningPath(path);
+        setArea("planning");
         return;
       }
       setDoc(result);
@@ -1410,7 +1420,7 @@ export default function App() {
             </div>
           </div>
         ) : area === "analysis" ? (
-          <AnalysisWorkspace key={project.novel_id} project={project} documents={documents} approvals={approvals} unsavedPath={dirty ? doc?.path : undefined} onOpen={(path, line) => void openDocument(path, true, false, line)} onRefresh={() => refresh(project.novel_id)} />
+          <AnalysisWorkspace key={project.novel_id} project={project} documents={documents} approvals={approvals} currentDocument={doc || undefined} unsavedPath={dirty ? doc?.path : undefined} onOpen={(path, line, expectedHash) => void openDocument(path, true, false, line, expectedHash)} onRefresh={() => refresh(project.novel_id)} />
         ) : area === "planning" ? (
           <PlanningWorkspace
             key={project.novel_id}

@@ -7,6 +7,8 @@ This module uses only the Python standard library and makes no network calls.
 from __future__ import annotations
 
 import copy
+import bisect
+import math
 import re
 from pathlib import PurePosixPath
 from typing import Iterator, Optional
@@ -18,6 +20,7 @@ from .documents import (HASH, MAX_DOCUMENT_BYTES, ConflictError, DocumentStore,
                         _read_raw, _snapshot)
 from .files import atomic_write, digest, json_bytes, read_json, tree_files
 from .project import Project, utc_now
+from .toolkit import TOOLKIT_PATH, WritingToolkitStore
 
 BASELINE_PATH = ".runtime/style-baseline.json"
 MAX_BASELINE_SAMPLES = 10
@@ -31,6 +34,12 @@ MAX_CATALOG_FILES = 1000
 REPORT_PATH = re.compile(r"reviews/analysis-([0-9a-f]{32})\.json\Z")
 CANNED_PHRASES = ("他不知道的是", "她不知道的是", "命运的齿轮开始转动", "嘴角勾起一抹",
                   "眼中闪过一丝", "一股莫名的", "不由得倒吸一口凉气")
+BASE_RULES = ("canned_phrase", "long_sentence", "literal_overlap")
+STYLE_RULES = ("baseline_sentence_shift", "baseline_dialogue_shift", "baseline_simile_shift",
+               "baseline_paragraph_shift", "baseline_rhythm_shift")
+LEGACY_RULES = BASE_RULES + ("baseline_sentence_shift",)
+TOOLKIT_RULES = ("lexicon_alias", "lexicon_forbidden", "lexicon_required", "style_avoid")
+ALL_RULES = BASE_RULES + STYLE_RULES + TOOLKIT_RULES
 LIMITATIONS = [
     "本地规则仅提供审稿线索，不判断文学质量、人物是否失忆、伏笔是否回收或剧情是否语义重复。",
     "统计依赖标点与词项；相似或重复文字可能是有意回响，需作者结合上下文判断。",
@@ -60,7 +69,7 @@ def _current_hash(project: Project, path: str) -> Optional[str]:
     return digest(raw) if raw is not None else None
 
 
-def _metrics(text: str) -> dict:
+def _legacy_metrics(text: str) -> dict:
     sentences = [item.strip() for item in re.split(r"[。！？!?]+", text) if item.strip()]
     lengths = [len(re.sub(r"\s", "", sentence)) for sentence in sentences]
     total = max(1, len(text))
@@ -70,6 +79,19 @@ def _metrics(text: str) -> dict:
             "dialogue_marks_per_1000": round(sum(text.count(mark) for mark in "“”\"") / total * 1000, 2),
             "simile_terms_per_1000": round(sum(text.count(term) for term in ("仿佛", "似乎", "宛如"))
                                            / total * 1000, 2)}
+
+
+def _metrics(text: str) -> dict:
+    result = _legacy_metrics(text)
+    lengths = [len(re.sub(r"\s", "", item)) for item in re.split(r"[。！？!?]+", text) if item.strip()]
+    paragraphs = [len(re.sub(r"\s", "", item["quote"])) for item in _paragraphs(text)]
+    mean = sum(lengths) / max(1, len(lengths))
+    variance = sum((length - mean) ** 2 for length in lengths) / max(1, len(lengths))
+    result.update(mean_paragraph_characters=round(sum(paragraphs) / max(1, len(paragraphs)), 2),
+                  short_sentences_percent=round(sum(length <= 15 for length in lengths)
+                                                / max(1, len(lengths)) * 100, 2),
+                  sentence_length_variation=round(math.sqrt(variance) / max(1, mean), 3))
+    return result
 
 
 def _paragraphs(text: str) -> Iterator[dict]:
@@ -148,14 +170,31 @@ def _validate_report(data: dict) -> None:
             require(1 <= value["start_line"] <= value["end_line"])
             text(value["quote"], 2000)
 
-    def metrics(value):
-        fields(value, _metrics(""))
+    def metrics(value, *, legacy=False, allow_legacy=False):
+        # Baseline snapshots created before v2 retain their exact seven-field
+        # schema. Do not silently rewrite them on read.
+        require(isinstance(value, dict))
+        allowed = [set(_legacy_metrics(""))] if legacy else [set(_metrics(""))]
+        if allow_legacy and not legacy:
+            allowed.append(set(_legacy_metrics("")))
+        require(set(value) in allowed)
         for metric in value.values():
-            require(type(metric) in (int, float) and 0 <= metric <= MAX_BASELINE_BYTES + MAX_BASELINE_SAMPLES * 2)
+            require(type(metric) in (int, float)
+                    and 0 <= metric <= MAX_BASELINE_BYTES + MAX_BASELINE_SAMPLES * 2
+                    and math.isfinite(metric))
 
     fields(data, {"schema_version", "id", "novel_id", "created_at", "canonical_revision", "source",
-                  "dependencies", "metrics", "baseline", "issues", "coverage", "limitations"})
-    require(type(data["schema_version"]) is int and data["schema_version"] == 1)
+                  "dependencies", "metrics", "baseline", "issues", "coverage", "limitations"},
+           {"runtime_dependencies"})
+    require(type(data["schema_version"]) is int and data["schema_version"] in (1, 2))
+    legacy = data["schema_version"] == 1
+    if legacy:
+        require("runtime_dependencies" not in data)
+    else:
+        require("runtime_dependencies" in data)
+        fields(data["runtime_dependencies"], {BASELINE_PATH, TOOLKIT_PATH})
+        for value in data["runtime_dependencies"].values():
+            hash_value(value, nullable=True)
     text(data["id"], 32)
     text(data["novel_id"], 100)
     text(data["created_at"], 100)
@@ -164,12 +203,13 @@ def _validate_report(data: dict) -> None:
     require(isinstance(data["dependencies"], dict) and len(data["dependencies"]) <= 100)
     for path, value in data["dependencies"].items():
         source({"path": path, "hash": value})
-    metrics(data["metrics"])
+    metrics(data["metrics"], legacy=legacy)
     texts(data["limitations"])
 
     baseline = data["baseline"]
     fields(baseline, {"novel_id", "configured", "path", "hash", "config_hash", "samples", "metrics",
-                      "stale", "limitations", "comparison_available"}, {"created_at"})
+                      "stale", "limitations", "comparison_available"},
+           {"created_at"} if legacy else {"created_at", "comparison"})
     require(baseline["novel_id"] == data["novel_id"] and baseline["path"] == BASELINE_PATH)
     for key in ("configured", "stale", "comparison_available"):
         require(type(baseline[key]) is bool)
@@ -179,26 +219,56 @@ def _validate_report(data: dict) -> None:
     require(bool(baseline["samples"]) == baseline["configured"])
     for sample in baseline["samples"]:
         source(sample, sample=True)
+    require(len({sample["path"] for sample in baseline["samples"]}) == len(baseline["samples"]))
     if baseline["configured"]:
-        metrics(baseline["metrics"])
+        metrics(baseline["metrics"], legacy=legacy, allow_legacy=True)
     else:
         require(baseline["metrics"] is None)
     texts(baseline["limitations"])
     if "created_at" in baseline:
         text(baseline["created_at"], 100)
 
-    rules = {"canned_phrase", "long_sentence", "literal_overlap", "baseline_sentence_shift"}
+    if not legacy:
+        require("comparison" in baseline)
+        require(data["runtime_dependencies"][BASELINE_PATH] == baseline["hash"])
+        comparison = baseline["comparison"]
+        fields(comparison, {"excluded_paths", "samples", "metrics", "reason"})
+        texts(comparison["excluded_paths"], MAX_BASELINE_SAMPLES)
+        require(len(set(comparison["excluded_paths"])) == len(comparison["excluded_paths"]))
+        require(all(path == data["source"]["path"] for path in comparison["excluded_paths"]))
+        require(isinstance(comparison["samples"], list)
+                and len(comparison["samples"]) <= MAX_BASELINE_SAMPLES)
+        manifest = {sample["path"]: sample["hash"] for sample in baseline["samples"]}
+        selected = set()
+        for sample in comparison["samples"]:
+            source(sample)
+            require(sample["path"] not in selected and manifest.get(sample["path"]) == sample["hash"]
+                    and sample["path"] not in comparison["excluded_paths"])
+            selected.add(sample["path"])
+        require(selected == set(manifest) - set(comparison["excluded_paths"]))
+        if comparison["metrics"] is not None:
+            metrics(comparison["metrics"])
+        require((comparison["metrics"] is not None) == baseline["comparison_available"])
+        text(comparison["reason"])
+
+    rules = set(LEGACY_RULES if legacy else ALL_RULES)
     coverage = data["coverage"]
     fields(coverage, {"rules", "skipped", "source_characters", "history_scanned", "history_sources", "omitted",
-                      "issue_limit", "issue_limit_reached", "baseline_compared"})
+                      "issue_limit", "issue_limit_reached", "baseline_compared"},
+           () if legacy else {"rule_counts"})
     texts(coverage["rules"], len(rules))
     require(all(rule in rules for rule in coverage["rules"]))
+    require(len(set(coverage["rules"])) == len(coverage["rules"]))
     require(isinstance(coverage["skipped"], list) and len(coverage["skipped"]) <= len(rules))
     for skipped in coverage["skipped"]:
         fields(skipped, {"rule", "reason"})
         text(skipped["rule"])
         require(skipped["rule"] in rules)
         text(skipped["reason"])
+    skipped_rules = [item["rule"] for item in coverage["skipped"]]
+    require(len(set(skipped_rules)) == len(skipped_rules)
+            and not set(skipped_rules) & set(coverage["rules"])
+            and set(skipped_rules) | set(coverage["rules"]) == rules)
     number(coverage["source_characters"], MAX_TARGET_CHARS)
     number(coverage["history_scanned"], MAX_HISTORY_FILES)
     require(isinstance(coverage["history_sources"], list)
@@ -213,6 +283,14 @@ def _validate_report(data: dict) -> None:
         text(omitted["reason"])
     require(type(coverage["issue_limit"]) is int and coverage["issue_limit"] == MAX_ISSUES)
     require(type(coverage["issue_limit_reached"]) is bool and type(coverage["baseline_compared"]) is bool)
+    if not legacy:
+        require("rule_counts" in coverage)
+        fields(coverage["rule_counts"], rules)
+        for rule, counts in coverage["rule_counts"].items():
+            fields(counts, {"found", "returned", "truncated"})
+            for value in counts.values():
+                number(value, MAX_TARGET_CHARS * 1000)
+            require(counts["found"] == counts["returned"] + counts["truncated"])
 
     require(isinstance(data["issues"], list) and len(data["issues"]) <= MAX_ISSUES)
     identifiers = set()
@@ -232,6 +310,13 @@ def _validate_report(data: dict) -> None:
         if "related" in issue:
             source(issue["related"], related=True)
             require(data["dependencies"].get(issue["related"]["path"]) == issue["related"]["hash"])
+    if not legacy:
+        for rule, counts in coverage["rule_counts"].items():
+            require(counts["returned"] == sum(issue["rule"] == rule for issue in data["issues"]))
+            if rule not in coverage["rules"]:
+                require(counts["found"] == 0)
+        require(coverage["issue_limit_reached"] == any(counts["truncated"]
+                                                     for counts in coverage["rule_counts"].values()))
 
 
 class AnalysisStore:
@@ -250,7 +335,7 @@ class AnalysisStore:
             return result
         data = read_json(path, max_bytes=MAX_DOCUMENT_BYTES)
         if (set(data) != {"schema_version", "novel_id", "created_at", "samples", "config_hash", "metrics"}
-                or type(data["schema_version"]) is not int or data["schema_version"] != 1
+                or type(data["schema_version"]) is not int or data["schema_version"] not in (1, 2)
                 or data["novel_id"] != self.project.novel_id or not isinstance(data["samples"], list)
                 or not 1 <= len(data["samples"]) <= MAX_BASELINE_SAMPLES):
             raise VibeNovelError("样章基线格式或所属作品无效，请重新显式选择样章")
@@ -272,11 +357,33 @@ class AnalysisStore:
                                       "current_hash": current_hash, "stale": current_hash != sample["hash"]})
             manifest.append({"path": sample["path"], "hash": sample["hash"]})
             texts.append(sample["content"])
-        if data["config_hash"] != digest(json_bytes(manifest)) or data["metrics"] != _metrics("\n\n".join(texts)):
+        calculate = _legacy_metrics if data["schema_version"] == 1 else _metrics
+        if data["config_hash"] != digest(json_bytes(manifest)) or data["metrics"] != calculate("\n\n".join(texts)):
             raise VibeNovelError("样章配置校验失败，请重新显式选择样章")
         result.update(configured=True, hash=digest(path.read_bytes()), config_hash=data["config_hash"],
                       metrics=data["metrics"], stale=any(sample["stale"] for sample in result["samples"]),
                       created_at=data["created_at"])
+        return result
+
+    def _comparison(self, baseline: dict, target: str) -> dict:
+        """Use only the remaining author-selected snapshots, never a fallback."""
+        excluded = [sample["path"] for sample in baseline["samples"] if sample["path"] == target]
+        remaining = [sample for sample in baseline["samples"] if sample["path"] != target]
+        result = {"excluded_paths": excluded,
+                  "samples": [{"path": item["path"], "hash": item["hash"]} for item in remaining],
+                  "metrics": None, "reason": "baseline_missing"}
+        if not baseline["configured"]:
+            return result
+        if not remaining:
+            result["reason"] = "baseline_self_reference_only"
+            return result
+        if any(sample["stale"] for sample in remaining):
+            result["reason"] = "baseline_remaining_sample_stale"
+            return result
+        data = read_json(self.project.path(BASELINE_PATH), max_bytes=MAX_DOCUMENT_BYTES)
+        # _baseline has validated all immutable snapshots under the same lock.
+        contents = [sample["content"] for sample in data["samples"] if sample["path"] != target]
+        result.update(metrics=_metrics("\n\n".join(contents)), reason="fixed_snapshots_excluding_target")
         return result
 
     def baseline(self) -> dict:
@@ -308,7 +415,7 @@ class AnalysisStore:
                     raise VibeNovelError("所选样章合计超过 1 MiB，请减少样章")
                 snapshots.append({**sample, "content": _decode(raw)})
             manifest = [{"path": sample["path"], "hash": sample["hash"]} for sample in snapshots]
-            data = {"schema_version": 1, "novel_id": self.project.novel_id, "created_at": utc_now(),
+            data = {"schema_version": 2, "novel_id": self.project.novel_id, "created_at": utc_now(),
                     "samples": snapshots, "config_hash": digest(json_bytes(manifest)),
                     "metrics": _metrics("\n\n".join(sample["content"] for sample in snapshots))}
             encoded = json_bytes(data)
@@ -355,16 +462,29 @@ class AnalysisStore:
             if len(source["content"]) > MAX_TARGET_CHARS:
                 raise VibeNovelError(f"单次分析最多 {MAX_TARGET_CHARS} 字符，请拆分文档")
             baseline = self._baseline()
+            baseline["comparison"] = self._comparison(baseline, path)
+            baseline["comparison_available"] = baseline["comparison"]["metrics"] is not None
+            toolkit = WritingToolkitStore(self.project)
+            toolkit_settings = toolkit._settings()
             history, omitted = self._history(exclude=path)
             revision = state["revision"]
         text = source["content"]
-        issues = []
+        candidates = []
+        found_counts = {rule: 0 for rule in ALL_RULES}
+        sequence = 0
 
         def add(rule, line, quote, message, suggestion, *, severity="info", end=None, **extra):
-            if len(issues) < MAX_ISSUES:
-                issues.append({"id": f"issue-{len(issues) + 1:03d}", "rule": rule, "severity": severity,
-                               "start_line": line, "end_line": end or line, "quote": quote[:2000],
-                               "message": message, "suggestion": suggestion, "status": "pending", **extra})
+            nonlocal sequence
+            found_counts[rule] += 1
+            sequence += 1
+            issue = {"rule": rule, "severity": severity, "start_line": line, "end_line": end or line,
+                     "quote": quote[:2000], "message": message, "suggestion": suggestion,
+                     "status": "pending", **extra}
+            # Keep a bounded, sorted candidate pool. Later warnings displace
+            # early informational clues, rather than disappearing at the cap.
+            bisect.insort(candidates, ((0 if severity == "warning" else 1, line, sequence), issue))
+            if len(candidates) > MAX_ISSUES:
+                candidates.pop()
 
         for number, line in enumerate(text.splitlines(), 1):
             for phrase in CANNED_PHRASES:
@@ -397,42 +517,70 @@ class AnalysisStore:
             seen.setdefault(normalized, {"path": path, "hash": expected_hash,
                                          **paragraph, "quote": paragraph["quote"][:2000]})
         metrics = _metrics(text)
-        # A selected target is excluded from its comparison baseline. We retain
-        # the author's stored baseline unchanged rather than silently replacing it.
-        baseline["comparison_available"] = bool(baseline["configured"] and not baseline["stale"]
-                                                 and all(sample["path"] != path for sample in baseline["samples"]))
+        toolkit_audit = toolkit.audit_with_coverage(text, settings=toolkit_settings)
+        for item in toolkit_audit["issues"]:
+            add(item["rule"], item["start_line"], item["quote"], item["message"], item["suggestion"],
+                severity=item["severity"], end=item["end_line"])
+        for rule, counts in toolkit_audit["rule_counts"].items():
+            found_counts[rule] = counts["found"]
+        checked_rules = list(BASE_RULES + TOOLKIT_RULES)
+        skipped = []
         if baseline["comparison_available"]:
-            reference = baseline["metrics"]["mean_sentence_characters"]
-            actual = metrics["mean_sentence_characters"]
-            if reference > 0 and metrics["sentences"] >= 5 and (actual > reference * 1.8 or actual < reference * .55):
-                first = next((number for number, line in enumerate(text.splitlines(), 1) if line.strip()), 1)
-                quote = text.splitlines()[first - 1] if text.splitlines() else ""
-                add("baseline_sentence_shift", first, quote,
-                    f"本章平均句段长度 {actual}，固定样章为 {reference}；差异不代表文风错误。",
-                    "结合场景、对话比例与叙事目的决定是否需要调整；无需机械对齐样章。")
+            reference = baseline["comparison"]["metrics"]
+            first_paragraph = next(_paragraphs(text), None)
+            first = first_paragraph["start_line"] if first_paragraph else 1
+            quote = first_paragraph["quote"] if first_paragraph else ""
+            descriptions = [
+                ("baseline_sentence_shift", "mean_sentence_characters", "平均句段字符数（按句末标点切分）", 0,
+                 metrics["sentences"] >= 5 and reference["sentences"] >= 5),
+                ("baseline_dialogue_shift", "dialogue_marks_per_1000", "每千字符引号数（不是实际对话占比）", 8,
+                 metrics["characters"] >= 100 and reference["characters"] >= 100),
+                ("baseline_simile_shift", "simile_terms_per_1000", "每千字符仿佛/似乎/宛如词项数", 3,
+                 metrics["characters"] >= 100 and reference["characters"] >= 100),
+                ("baseline_paragraph_shift", "mean_paragraph_characters", "平均段落字符数（空行分段）", 0,
+                 metrics["paragraphs"] >= 3 and reference["paragraphs"] >= 3),
+                ("baseline_rhythm_shift", "sentence_length_variation", "句长变异系数（标准差/均值）", .35,
+                 metrics["sentences"] >= 5 and reference["sentences"] >= 5),
+            ]
+            for rule, key, label, minimum, eligible in descriptions:
+                if not eligible:
+                    skipped.append({"rule": rule, "reason": "insufficient_text_for_statistical_comparison"})
+                    continue
+                checked_rules.append(rule)
+                actual, expected = metrics[key], reference[key]
+                shifted = (actual > expected * 1.8 or actual < expected * .55) if expected else actual > 0
+                if shifted and abs(actual - expected) > minimum:
+                    add(rule, first, quote,
+                        f"本章{label}为 {actual}，余下固定样章为 {expected}；统计差异不代表文风错误或质量高低。",
+                        "结合场景、对话比例与叙事目的决定是否调整；无需机械对齐作者样章。")
+        else:
+            skipped = [{"rule": rule, "reason": baseline["comparison"]["reason"]} for rule in STYLE_RULES]
+        issues = [{"id": f"issue-{index:03d}", **candidate[1]}
+                  for index, candidate in enumerate(candidates, 1)]
+        rule_counts = {rule: {"found": found, "returned": sum(issue["rule"] == rule for issue in issues),
+                              "truncated": found - sum(issue["rule"] == rule for issue in issues)}
+                       for rule, found in found_counts.items()}
         report_id = uuid4().hex
         report_path = f"reviews/analysis-{report_id}.json"
         dependencies = {document["path"]: document["hash"] for document in history}
         dependencies[path] = expected_hash
-        if not baseline["stale"]:
-            dependencies.update({sample["path"]: sample["hash"] for sample in baseline["samples"]})
-        data = {"schema_version": 1, "id": report_id, "novel_id": self.project.novel_id,
+        if baseline["comparison_available"]:
+            dependencies.update({sample["path"]: sample["hash"] for sample in baseline["comparison"]["samples"]})
+        data = {"schema_version": 2, "id": report_id, "novel_id": self.project.novel_id,
                 "created_at": utc_now(), "canonical_revision": revision,
                 "source": {"path": path, "hash": expected_hash}, "dependencies": dependencies,
+                "runtime_dependencies": {BASELINE_PATH: baseline["hash"], TOOLKIT_PATH: toolkit_settings["hash"]},
                 "metrics": metrics, "baseline": baseline, "issues": issues,
-                "coverage": {"rules": ["canned_phrase", "long_sentence", "literal_overlap"]
-                                       + (["baseline_sentence_shift"] if baseline["comparison_available"] else []),
-                             "skipped": [] if baseline["comparison_available"] else [
-                                 {"rule": "baseline_sentence_shift", "reason": "baseline_missing_stale_or_self_reference"}],
+                "coverage": {"rules": checked_rules, "skipped": skipped, "rule_counts": rule_counts,
                              "source_characters": len(text), "history_scanned": len(history),
                              "history_sources": [{"path": item["path"], "hash": item["hash"]} for item in history],
                              "omitted": omitted, "issue_limit": MAX_ISSUES,
-                             "issue_limit_reached": len(issues) >= MAX_ISSUES,
+                             "issue_limit_reached": any(counts["truncated"] for counts in rule_counts.values()),
                              "baseline_compared": baseline["comparison_available"]},
                 "limitations": LIMITATIONS}
         self.documents.save(report_path, json_bytes(data).decode("utf-8"), None, "AI_SUGGESTED",
                             expected_sources=dependencies, expected_revision=revision,
-                            expected_runtime_sources={BASELINE_PATH: baseline["hash"]})
+                            expected_runtime_sources=data["runtime_dependencies"])
         return self.report(report_path)
 
     def _report(self, path: str, state: dict) -> dict:
@@ -460,9 +608,16 @@ class AnalysisStore:
         if data["canonical_revision"] != state["revision"]:
             reasons.append("正式作品版本已变化；历史检查覆盖范围需重新确认")
         current_baseline = self._baseline()
+        for runtime_path, expected in data.get("runtime_dependencies", {}).items():
+            if _current_hash(self.project, runtime_path) != expected:
+                reasons.append(f"写作分析配置已变化: {runtime_path}")
         if data["baseline"].get("hash") != current_baseline["hash"]:
             reasons.append("作者样章配置已变化")
-        if data["baseline"].get("stale") or current_baseline["stale"]:
+        compared_paths = {sample["path"] for sample in data["baseline"].get("comparison", {}).get("samples", [])}
+        baseline_stale = (any(sample["stale"] for sample in current_baseline["samples"]
+                              if sample["path"] in compared_paths)
+                          if data["schema_version"] == 2 else current_baseline["stale"])
+        if baseline_stale:
             reasons.append("固定样章的来源已变化或缺失，请重新选择后复查")
         data.update(path=path, hash=document["hash"], stale=bool(reasons), stale_reasons=reasons)
         data["source"]["current_hash"] = current_hash
@@ -472,6 +627,89 @@ class AnalysisStore:
     def report(self, path: str) -> dict:
         with self.storage.locked() as state:
             return self._report(path, state)
+
+    def verify(self, report_path: str, report_hash: str) -> dict:
+        """Rerun rules against current bytes without declaring prose repaired.
+
+        A new version-bound report is saved, while the prior report (including
+        manual author marks) remains immutable. Not finding evidence is never
+        translated into an automatic ``resolved`` status.
+        """
+        _expected(report_hash)
+        with self.storage.locked() as state:
+            previous = self._report(report_path, state)
+            if previous["hash"] != report_hash:
+                raise ConflictError("分析报告已变化，请刷新后再复测")
+            source_hash = _current_hash(self.project, previous["source"]["path"])
+            if source_hash:
+                try:
+                    current = self.documents._document(previous["source"]["path"], state)
+                    if len(current["content"]) > MAX_TARGET_CHARS:
+                        source_hash = None
+                except (OSError, VibeNovelError):
+                    source_hash = None
+        report = self.analyze(previous["source"]["path"], source_hash) if source_hash else None
+        # A concurrent author mark invalidates the requested old report version.
+        with self.storage.locked() as state:
+            if self.documents._document(report_path, state)["hash"] != report_hash:
+                raise ConflictError("复测期间旧报告已变化，请刷新后重试")
+            if report:
+                report = self._report(report["path"], state)
+        results = []
+        for issue in previous["issues"]:
+            rule = issue["rule"]
+            matches = []
+            status, reason = "unchecked", "当前来源缺失或不可读取，未执行复测。"
+            if report:
+                checked = rule in previous["coverage"]["rules"] and rule in report["coverage"]["rules"]
+                counts = report["coverage"].get("rule_counts", {}).get(rule)
+                for candidate in report["issues"]:
+                    if candidate["rule"] != rule:
+                        continue
+                    if rule.startswith("baseline_") or (rule == "lexicon_required"
+                                                          and candidate["message"] == issue["message"]):
+                        # These are document-level statistics, not a claim
+                        # about the first paragraph used as a display anchor.
+                        matches.append(candidate["id"])
+                    elif (_normal(candidate["quote"]) == _normal(issue["quote"])
+                          and (rule not in ("canned_phrase", *TOOLKIT_RULES)
+                               or candidate["message"] == issue["message"])):
+                        old_related, new_related = issue.get("related"), candidate.get("related")
+                        if (not old_related or (new_related and old_related["path"] == new_related["path"]
+                                               and _normal(old_related["quote"]) == _normal(new_related["quote"]))):
+                            matches.append(candidate["id"])
+                if report["stale"]:
+                    reason = "复测报告来源已变化，请对最新版本再次检查。"
+                elif not checked:
+                    reason = "该规则未在前后两个报告中完整执行；可能缺少有效样章或文本量不足。"
+                elif (rule.startswith("baseline_")
+                      and previous["baseline"]["hash"] != report["baseline"]["hash"]):
+                    reason = "作者样章配置已变化，前后统计参照不同，不能验证旧结论。"
+                elif (rule in TOOLKIT_RULES
+                      and previous.get("runtime_dependencies", {}).get(TOOLKIT_PATH)
+                      != report["runtime_dependencies"][TOOLKIT_PATH]):
+                    reason = "作者词表或风格约束已变化，前后规则配置不同，不能验证旧结论。"
+                elif matches:
+                    status, reason = "remaining", "当前版本仍命中同规则证据；行号以新报告为准，需作者判断。"
+                elif counts is None or counts["truncated"]:
+                    reason = "本规则结果发生截断或旧格式缺少覆盖计数，无法确认旧证据是否仍命中。"
+                elif rule == "literal_overlap" and report["coverage"]["omitted"]:
+                    reason = "历史检查存在遗漏，未命中不能排除旧证据仍在未检查范围。"
+                elif (rule == "literal_overlap" and issue.get("related")
+                      and issue["related"]["path"] != previous["source"]["path"]
+                      and report["dependencies"].get(issue["related"]["path"]) != issue["related"]["hash"]):
+                    reason = "对应历史来源已变化或未进入复测范围，旧证据无法按原版本复核。"
+                else:
+                    status, reason = "not_found", "新报告未命中这条旧证据；这不表示修改正确或问题已解决。"
+            results.append({"issue_id": issue["id"], "rule": rule, "previous_status": issue["status"],
+                            "status": status, "matched_issue_ids": matches, "reason": reason})
+        return {"novel_id": self.project.novel_id, "created_at": utc_now(),
+                "previous": {"path": previous["path"], "hash": previous["hash"], "source": previous["source"]},
+                "report": report, "results": results,
+                "coverage": {"previous": previous["coverage"], "current": report["coverage"] if report else None},
+                "limitations": ["复测只重新运行列明的本地规则，不是文学质量或剧情事实验收。",
+                                "not_found 表示本次未命中旧证据；unchecked 表示检查域不足或版本条件不一致。",
+                                "旧报告的 resolved/ignored 仍是作者标记，不会因复测自动改变。"]}
 
     def mark(self, report_path: str, report_hash: str, issue_id: str, status: str) -> dict:
         if status not in ("pending", "resolved", "ignored"):

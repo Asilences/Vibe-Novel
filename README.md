@@ -146,6 +146,23 @@ python tools/vibenovel.py config
 
 成功结果为 JSON（`--help`/`--version` 除外）；退出码 `0` 为成功、`1` 为完整性检查发现问题、`2` 为输入/配置/操作错误。`status` 的 `fingerprint` 是正式内容的当前指纹，不是批准记录或完整历史版本。`verify` 是磁盘完整性检查，`quality_review: not_run` 表示没有运行文学/连续性审稿。
 
+## DSH 写作能力完善（3.0.0a5）
+
+在「写作检查」中使用六个页面：写前包、本地审稿、固定样章、历史检索、用词与档案、跨章线索。词表与作者文风规则以本作品JSON配置；固定锚段须明确选择来源版本和行号。复查生成新报告，区分“仍命中／未再命中／未验证”，保留原报告的作者标记。跨章看板提供人物提及空档、伏笔关键词跨度和章计划覆盖，并可生成不含正文的诊断JSON。
+
+历史检索默认字面词项，可切换真正的**本地语义检索**。首次安装需下载固定版本约24MB量化模型（加约0.4MB分词器）：
+
+```powershell
+python -m pip install -e ".[studio,test,semantic]"
+python tools/setup_semantic.py --proxy http://127.0.0.1:7890
+```
+
+不使用代理时省略 `--proxy`。本机已完成安装和真实推理验证；新电脑需执行上述命令。安装脚本仅下载公共模型，不读取小说或API密钥；正常查询不联网、不调用付费API。可选推理依赖采用已验证的ONNX Runtime 1.20.1，并在独立进程中运行，失败不会终止Studio。
+
+模型保存在工作区 `.runtime-build/models/bge-small-zh-v1.5/`，章节向量缓存位于作品 `.runtime/semantic-index.json`；两者均不上传Git。删除缓存后可从正式正文重建。单次扫描80份/8MiB正式章节、最多4000块（每块200字符），遗漏和截断均会说明；相似度提供相关候选，不证明剧情相同、矛盾或伏笔回收。
+
+完整20项DSH能力对照、有意替代及未实现部分见 [DSH吸收说明](docs/dsh_absorption_v3.md)。本次没有启用多模型编排，也未完成多文件事务定稿。
+
 ## 开发与验收
 
 ```bash
@@ -160,6 +177,7 @@ npm run build
 测试全部使用临时目录，不修改真实作品。[GitHub Actions CI](.github/workflows/tests.yml)覆盖 Windows/Linux 和 Python 3.9/3.13，在 PR 更新及 `main` 推送时运行；同一分支的新提交会取消过时运行。[云端结果](https://github.com/Asilences/Vibe-Novel/actions)与本地验收记录分别查看。部分 Windows 环境无符号链接权限时会显示跳过，并另测 junction 边界。
 
 - [设计审计](docs/design_audit_v3.md)：发现、证据与修正。
+- [DSH吸收审计](docs/dsh_integration_audit_v3.md)：原始问题与后续修复证据。
 - [Studio 设计审计](docs/studio_design_v3.md)：前端、API、任务、审批与阶段边界。
 - [创作规划工作台](docs/planning_workbench_v3.md)：卷章、设定、关系、伏笔、文风和来源审批。
 - [实施计划](docs/implementation_plan_v3.md)：M0–M5 范围、状态及需求追踪。

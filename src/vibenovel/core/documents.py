@@ -323,10 +323,12 @@ class DocumentStore:
         with self.storage.locked() as state:
             if expected_runtime_sources is not None:
                 if (not isinstance(expected_runtime_sources, dict)
-                        or set(expected_runtime_sources) != {".runtime/style-baseline.json"}):
-                    raise VibeNovelError("仅允许固定文风样章配置作为运行依赖")
-                _check_expected(_read_raw(self.project, ".runtime/style-baseline.json"),
-                                expected_runtime_sources[".runtime/style-baseline.json"])
+                        or not expected_runtime_sources
+                        or not set(expected_runtime_sources) <= {".runtime/style-baseline.json",
+                                                               ".runtime/writing-toolkit.json"}):
+                    raise VibeNovelError("仅允许固定文风样章或写作工具配置作为运行依赖")
+                for runtime_path, expected in expected_runtime_sources.items():
+                    _check_expected(_read_raw(self.project, runtime_path), expected)
             if expected_revision is not None:
                 if type(expected_revision) is not int or expected_revision < 0:
                     raise VibeNovelError("expected_revision 需要非负整数")

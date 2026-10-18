@@ -3,6 +3,7 @@ export type Project = {
   title: string;
   genre: string;
   counts?: Record<string, number>;
+  canonical_revision?: number;
 };
 export type Provider = {
   id: string;
@@ -177,6 +178,7 @@ export type AnalysisIssue = {
   message: string;
   suggestion: string;
   status: "pending" | "resolved" | "ignored";
+  related?: { path: string; hash: string; start_line: number; end_line: number; quote: string };
 };
 export type AnalysisReport = {
   id: string;
@@ -193,12 +195,25 @@ export type AnalysisReport = {
   coverage: Record<string, unknown>;
   limitations: string[];
 };
+export type AnalysisVerification = {
+  report: AnalysisReport | null;
+  previous: { path: string; hash: string; source: { path: string; hash: string } };
+  results: { issue_id: string; rule: string; previous_status: AnalysisIssue["status"]; status: "remaining" | "not_found" | "unchecked"; matched_issue_ids: string[]; reason: string }[];
+  limitations: string[];
+};
 export type AnalysisSearch = {
   results: { path: string; hash: string; start_line: number; end_line: number; quote: string; score: number }[];
   scanned: number;
   omitted: unknown[];
   limitations: string[];
+  canonical_revision?: number;
+  mode?: "literal" | "semantic" | "local_embedding";
+  indexed_chunks?: number;
+  reused_chunks?: number;
+  model?: string;
+  revision?: string;
 };
+export type SemanticStatus = { available: boolean; model_present: boolean; dependencies_present: boolean; model: string; revision: string; reason: string; setup_command: string; loaded: boolean };
 export type ChapterBrief = {
   sections: { id: string; label: string; status: string; paths: string[]; content: string; truncated?: boolean }[];
   sources: Record<string, string>;
@@ -208,6 +223,32 @@ export type ChapterBrief = {
   text: string;
   chapter?: number;
   budget?: { characters: number; limit: number };
+  canonical_revision?: number;
+  input_manifest?: { path: string; hash: string; role: string; ranges: Record<string, unknown>[]; characters: number; section_id: string }[];
+};
+export type AnalysisEvidence = { path: string; hash: string; start_line: number; end_line: number; quote: string };
+export type AnalysisToolkit = {
+  schema_version: number;
+  novel_id: string;
+  configured: boolean;
+  hash: string | null;
+  lexicon: { id: string; term: string; aliases: string[]; forbidden: string[]; required: boolean; note: string }[];
+  characters: { id: string; name: string; aliases: string[]; max_absence: number }[];
+  threads: { id: string; label: string; terms: string[]; start_chapter: number; remind_after: number; end_chapter: number | null }[];
+  style: { instructions: string; avoid: string[]; anchors: (AnalysisEvidence & { current_hash: string | null; stale: boolean })[] };
+  stale: boolean;
+};
+export type AnalysisStructure = {
+  novel_id: string;
+  canonical_revision: number;
+  toolkit_hash: string | null;
+  scanned: number;
+  omitted: { path: string; reason: string }[];
+  characters: { id: string; name: string; mentioned_chapters: number[]; last_mentioned: number | null; absence: number | null; status: string; evidence: AnalysisEvidence[] }[];
+  threads: { id: string; label: string; start_chapter: number; end_chapter: number | null; last_mentioned: number | null; span: number | null; status: string; evidence: AnalysisEvidence[] }[];
+  outline: { path: string; hash: string; chapter: number | null; has_chapter: boolean | null }[];
+  keywords: { term: string; count: number }[];
+  limitations: string[];
 };
 export type APISettingsData = {
   hash: string | null;
