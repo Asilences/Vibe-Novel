@@ -29,7 +29,7 @@ def load_config(workspace: Path) -> dict:
     if not isinstance(execution, dict) or set(execution) != set(DEFAULT_CONFIG["execution"]):
         raise VibeNovelError("execution 配置字段不完整或含未知字段")
     if execution["mode"] != "codex_interactive":
-        raise VibeNovelError("离线 CLI 配置仅支持 codex_interactive；Studio API 由启动环境单独配置")
+        raise VibeNovelError("离线 CLI 配置仅支持 codex_interactive；Studio API 由 api.local.json 或启动环境单独配置")
     if execution["approval_policy"] != "human_for_L3" or execution["plan_approval"] != "per_chapter":
         raise VibeNovelError("保留 L3 作者批准与逐章计划批准")
     count = execution["default_max_draft_chapters"]

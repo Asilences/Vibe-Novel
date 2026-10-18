@@ -231,6 +231,7 @@ def create_app(workspace: Path, *, frontend_dir: Optional[Path] = None, job_mana
         providers = [dict(capability[name], id=name, label=label) for name, label in (
             ("codex", "Codex · 交互接力"), ("api", "API · 自动生成"))]
         return {"version": __version__, "csrf_token": token, "capabilities": {
+            "default_provider": capability.get("default_provider", "api"),
             "providers": providers, "tasks": ["expand_outline", "draft", "review", "rewrite"],
             "limits": capability.get("limits", {})}}
 

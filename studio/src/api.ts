@@ -13,7 +13,11 @@ export type Provider = {
 export type Bootstrap = {
   version: string;
   csrf_token: string;
-  capabilities: { providers: Provider[]; tasks?: unknown[] };
+  capabilities: {
+    providers: Provider[];
+    tasks?: unknown[];
+    default_provider?: "api" | "codex";
+  };
 };
 export type DocumentItem = {
   path: string;

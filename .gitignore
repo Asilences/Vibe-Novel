@@ -26,3 +26,6 @@ node_modules/
 studio/dist/
 *.tsbuildinfo
 .studio-cache/
+
+# Studio API credentials stay on this computer
+/config/*.local.json*

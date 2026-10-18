@@ -1,0 +1,8 @@
+{
+  "default_provider": "api",
+  "api": {
+    "base_url": "https://api.deepseek.com",
+    "model": "deepseek-flash",
+    "api_key": ""
+  }
+}

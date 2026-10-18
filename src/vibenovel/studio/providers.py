@@ -1,4 +1,4 @@
-"""Text-only generation adapters. Credentials stay in process environment."""
+"""Text-only generation adapters. Credentials stay in backend local settings."""
 from __future__ import annotations
 
 import ipaddress
@@ -9,9 +9,11 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Mapping, Optional
 
 from vibenovel.errors import VibeNovelError
+from .settings import SettingsError, StudioSettings, load_settings
 
 
 class ProviderError(VibeNovelError):
@@ -51,7 +53,7 @@ def _endpoint(base: str, allow_loopback: bool) -> str:
     except ValueError:
         pass
     if is_loopback and not allow_loopback:
-        raise ProviderError("本地 API 需显式设置 VIBENOVEL_ALLOW_LOOPBACK_API=1")
+        raise ProviderError("本地 API 需显式启用本机接口开关")
     if parsed.scheme != "https" and not (is_loopback and allow_loopback):
         raise ProviderError("外部 API 地址必须使用 HTTPS")
     path = parsed.path.rstrip("/")
@@ -74,14 +76,20 @@ def _usage(value) -> Optional[dict]:
 class OpenAICompatibleProvider:
     """OpenAI-compatible chat completions; no tool calling or automatic retry."""
 
-    def __init__(self, environment: Optional[Mapping[str, str]] = None, *, timeout: float = 30):
-        env = os.environ if environment is None else environment
-        self._key = env.get("VIBENOVEL_API_KEY", "").strip()
-        self._model = env.get("VIBENOVEL_API_MODEL", "").strip()
-        base = env.get("VIBENOVEL_API_BASE", "https://api.openai.com/v1").strip()
-        self._endpoint = _endpoint(base, env.get("VIBENOVEL_ALLOW_LOOPBACK_API") == "1")
-        if not self._key or not self._model:
-            raise ProviderError("请在启动 Studio 的环境中设置 VIBENOVEL_API_KEY 和 VIBENOVEL_API_MODEL")
+    def __init__(self, environment: Optional[Mapping[str, str]] = None, *, timeout: float = 30,
+                 workspace: Optional[Path] = None, settings: Optional[StudioSettings] = None):
+        if workspace is not None:
+            settings = load_settings(workspace, environment)
+        if settings is None:
+            # Preserve the standalone adapter's established environment contract.
+            env = os.environ if environment is None else environment
+            settings = StudioSettings(base_url=env.get("VIBENOVEL_API_BASE", "https://api.openai.com/v1").strip(),
+                       model=env.get("VIBENOVEL_API_MODEL", "").strip(), api_key=env.get("VIBENOVEL_API_KEY", "").strip(),
+                       allow_loopback=env.get("VIBENOVEL_ALLOW_LOOPBACK_API") == "1")
+        self._key, self._model = settings.api_key, settings.model
+        if not settings.base_url or not self._key or not self._model:
+            raise ProviderError("请填写本地 API 配置的地址、模型和密钥，或设置对应环境变量")
+        self._endpoint = _endpoint(settings.base_url, settings.allow_loopback)
         if any(ord(char) < 32 for char in self._key + self._model):
             raise ProviderError("API 环境配置含无效控制字符")
         self._timeout = timeout
@@ -128,15 +136,21 @@ class OpenAICompatibleProvider:
         return GenerationResult(text, _usage(value.get("usage")), self._model)
 
 
-def capabilities(environment: Optional[Mapping[str, str]] = None) -> dict:
+def capabilities(environment: Optional[Mapping[str, str]] = None, *, workspace: Optional[Path] = None) -> dict:
     """Expose availability, never keys, URLs containing credentials, or exceptions."""
-    env = os.environ if environment is None else environment
+    default_provider = "api"
     try:
-        OpenAICompatibleProvider(env)
+        if workspace is not None:
+            settings = load_settings(workspace, environment)
+            default_provider = settings.default_provider
+            OpenAICompatibleProvider(settings=settings)
+        else:
+            OpenAICompatibleProvider(environment)
         available, reason = True, None
-    except ProviderError as exc:
+    except (ProviderError, SettingsError) as exc:
         available, reason = False, str(exc)
     return {
+        "default_provider": default_provider,
         "api": {"available": available, "mode": "openai_compatible", "reason": reason,
                 "token_usage": "reported_or_null", "cost_usd": None},
         "codex": {"available": True, "mode": "interactive_handoff",

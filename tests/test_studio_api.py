@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
+import os
 import tempfile
 import time
 import unittest
@@ -37,6 +39,32 @@ class StudioAPITests(unittest.TestCase):
 
     def write(self, path, body, method="POST"):
         return self.client.request(method, path, headers=self.headers, json=body)
+
+    def test_bootstrap_local_api_settings_hot_reload_default_and_secret_isolation(self):
+        path = self.workspace / "config" / "api.local.json"
+        path.parent.mkdir(exist_ok=True)
+        with patch.dict(os.environ, {}, clear=True):
+            bootstrap = self.client.get("/api/bootstrap").json()["capabilities"]
+            self.assertEqual(bootstrap["default_provider"], "api")
+            self.assertFalse(next(item for item in bootstrap["providers"] if item["id"] == "api")["available"])
+            config = {"default_provider": "api", "api": {"base_url": "https://example.invalid/v1",
+                      "model": "private-model-name", "api_key": "private-bootstrap-secret"}}
+            path.write_text(json.dumps(config), encoding="utf-8")
+            response = self.client.get("/api/bootstrap")
+            bootstrap = response.json()["capabilities"]
+            self.assertTrue(next(item for item in bootstrap["providers"] if item["id"] == "api")["available"])
+            self.assertNotIn("private-bootstrap-secret", response.text)
+            self.assertNotIn("private-model-name", response.text)
+            self.assertNotIn("example.invalid", response.text)
+            for supplied in ('{"private-malicious-field":1,"private-malicious-field":2}',
+                             json.dumps(dict(config, api=dict(config["api"], base_url="https://example.invalid/v1?key=private-url-secret")))):
+                path.write_text(supplied, encoding="utf-8")
+                response = self.client.get("/api/bootstrap")
+                self.assertEqual(response.status_code, 200)
+                bootstrap = response.json()["capabilities"]
+                self.assertEqual(bootstrap["default_provider"], "api")
+                self.assertFalse(next(item for item in bootstrap["providers"] if item["id"] == "api")["available"])
+                self.assertNotIn("private-", response.text)
 
     def save(self, path="drafts/ch001.md", content="原稿", expected_hash=None):
         response = self.write(self.base + "/document", {"path": path, "content": content,
