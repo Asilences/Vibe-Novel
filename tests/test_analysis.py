@@ -285,7 +285,7 @@ class AnalysisTests(unittest.TestCase):
             (("issues", 0), "message", {"bad": True}), (("issues", 0), "suggestion", []),
             (("issues", 0), "rule", []), (("issues", 0), "unexpected", {}),
             (("issues", 0), "related", {"path": "chapters/ch001.md", "hash": "0" * 64}),
-            (("issues", 1, "related"), "quote", {}),
+            (("issues", 0, "related"), "quote", {}),
         ]
         for parents, field, value in mutations:
             with self.subTest(parents=parents, field=field):

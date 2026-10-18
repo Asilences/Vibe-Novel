@@ -3,6 +3,7 @@ export type Project = {
   title: string;
   genre: string;
   counts?: Record<string, number>;
+  canonical_revision?: number;
 };
 export type Provider = {
   id: string;
@@ -55,7 +56,7 @@ export type Job = {
   created_at: string;
   result_path?: string;
   error?: string;
-  request?: { instruction?: string; document_path?: string };
+  request?: { instruction?: string; document_path?: string; document_hash?: string; selection?: { start_char: number; end_char: number }; editorial?: { goals: string[]; intensity: "conservative" | "standard" | "deep" } };
   logs?: Array<string | Record<string, unknown>>;
   usage?: Record<string, unknown> | null;
   cost_usd?: number | null;
@@ -63,6 +64,9 @@ export type Job = {
   recovery_available?: boolean;
   recovery_candidate?: string;
   repair_candidate?: string;
+  result_hash?: string;
+  result_version_id?: string;
+  editorial_context?: { selection?: { start_char: number; end_char: number }; goals: string[]; intensity: string; sources: Record<string, string>; omitted: unknown[]; runtime_sources?: Record<string, string>; prompt_budget?: { characters: number; limit: number } };
 };
 export type Imported = {
   import_id: string;
@@ -71,6 +75,10 @@ export type Imported = {
   extracted_hash?: string;
   created_at?: string;
 };
+export type ManuscriptSection = { id: string; order: number; title: string; start_line: number; end_line: number; start_char: number; end_char: number; characters: number };
+export type ManuscriptPreview = { novel_id: string; source: { path: string; hash: string; characters: number; lines: number }; sections: ManuscriptSection[]; warnings: string[]; limitations: string[] };
+export type ManuscriptSession = { schema_version: number; id: string; novel_id: string; created_at: string; source: ManuscriptPreview["source"]; sections: (ManuscriptSection & { path: string; original_hash: string; current_hash: string | null; changed: boolean; accepted: boolean })[]; hash: string; path: string; stale: boolean; stale_reasons: string[]; limitations: string[] };
+export type ManuscriptSummary = { id: string; created_at: string; source: ManuscriptPreview["source"]; hash: string; path: string; sections?: number | ManuscriptSession["sections"] };
 
 export type PlanningEvidence = {
   path: string;
@@ -177,6 +185,7 @@ export type AnalysisIssue = {
   message: string;
   suggestion: string;
   status: "pending" | "resolved" | "ignored";
+  related?: { path: string; hash: string; start_line: number; end_line: number; quote: string };
 };
 export type AnalysisReport = {
   id: string;
@@ -193,12 +202,25 @@ export type AnalysisReport = {
   coverage: Record<string, unknown>;
   limitations: string[];
 };
+export type AnalysisVerification = {
+  report: AnalysisReport | null;
+  previous: { path: string; hash: string; source: { path: string; hash: string } };
+  results: { issue_id: string; rule: string; previous_status: AnalysisIssue["status"]; status: "remaining" | "not_found" | "unchecked"; matched_issue_ids: string[]; reason: string }[];
+  limitations: string[];
+};
 export type AnalysisSearch = {
   results: { path: string; hash: string; start_line: number; end_line: number; quote: string; score: number }[];
   scanned: number;
   omitted: unknown[];
   limitations: string[];
+  canonical_revision?: number;
+  mode?: "literal" | "semantic" | "local_embedding";
+  indexed_chunks?: number;
+  reused_chunks?: number;
+  model?: string;
+  revision?: string;
 };
+export type SemanticStatus = { available: boolean; model_present: boolean; dependencies_present: boolean; model: string; revision: string; reason: string; setup_command: string; loaded: boolean };
 export type ChapterBrief = {
   sections: { id: string; label: string; status: string; paths: string[]; content: string; truncated?: boolean }[];
   sources: Record<string, string>;
@@ -208,6 +230,32 @@ export type ChapterBrief = {
   text: string;
   chapter?: number;
   budget?: { characters: number; limit: number };
+  canonical_revision?: number;
+  input_manifest?: { path: string; hash: string; role: string; ranges: Record<string, unknown>[]; characters: number; section_id: string }[];
+};
+export type AnalysisEvidence = { path: string; hash: string; start_line: number; end_line: number; quote: string };
+export type AnalysisToolkit = {
+  schema_version: number;
+  novel_id: string;
+  configured: boolean;
+  hash: string | null;
+  lexicon: { id: string; term: string; aliases: string[]; forbidden: string[]; required: boolean; note: string }[];
+  characters: { id: string; name: string; aliases: string[]; max_absence: number }[];
+  threads: { id: string; label: string; terms: string[]; start_chapter: number; remind_after: number; end_chapter: number | null }[];
+  style: { instructions: string; avoid: string[]; anchors: (AnalysisEvidence & { current_hash: string | null; stale: boolean })[] };
+  stale: boolean;
+};
+export type AnalysisStructure = {
+  novel_id: string;
+  canonical_revision: number;
+  toolkit_hash: string | null;
+  scanned: number;
+  omitted: { path: string; reason: string }[];
+  characters: { id: string; name: string; mentioned_chapters: number[]; last_mentioned: number | null; absence: number | null; status: string; evidence: AnalysisEvidence[] }[];
+  threads: { id: string; label: string; start_chapter: number; end_chapter: number | null; last_mentioned: number | null; span: number | null; status: string; evidence: AnalysisEvidence[] }[];
+  outline: { path: string; hash: string; chapter: number | null; has_chapter: boolean | null }[];
+  keywords: { term: string; count: number }[];
+  limitations: string[];
 };
 export type APISettingsData = {
   hash: string | null;

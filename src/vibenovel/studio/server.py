@@ -34,6 +34,10 @@ from vibenovel.core.export import export_markdown
 from vibenovel.core.files import cleanup_stage, safe_path
 from vibenovel.core.imports import import_outline, verify_bundle, verify_project
 from vibenovel.core.project import ProjectStore
+from vibenovel.core.toolkit import WritingToolkitStore
+from vibenovel.core.semantic import SemanticStore
+from vibenovel.core.diagnostics import WritingDiagnosticsStore
+from vibenovel.core.manuscripts import ManuscriptStore
 from vibenovel.errors import MissingDocumentError, VibeNovelError
 from .jobs import JobManager
 from .settings import public_settings, save_settings
@@ -83,6 +87,16 @@ class Decision(Input):
     note: StrictStr = Field(default="", max_length=4000)
 
 
+class EditorialSelection(Input):
+    start_char: int = Field(ge=0)
+    end_char: int = Field(ge=1)
+
+
+class EditorialOptions(Input):
+    goals: list[Literal["remove_cliches", "reduce_repetition", "show_actions", "natural_dialogue", "preserve_voice"]] = Field(max_length=5)
+    intensity: Literal["conservative", "standard", "deep"]
+
+
 class JobRequest(Input):
     kind: Literal["expand_outline", "draft", "review", "rewrite", "build_blueprint"]
     provider: Literal["api"] = "api"
@@ -94,6 +108,8 @@ class JobRequest(Input):
     planning_start: Optional[int] = Field(default=None, ge=1, le=999999)
     planning_count: Optional[int] = Field(default=None, ge=1, le=10)
     brief_mode: Optional[Literal["compact", "full"]] = None
+    selection: Optional[EditorialSelection] = None
+    editorial: Optional[EditorialOptions] = None
 
 
 class PlanningProposal(Input):
@@ -134,6 +150,23 @@ class AnalyzeDocument(Input):
     expected_hash: StrictStr
 
 
+class ManuscriptSource(Input):
+    source_path: StrictStr
+    source_hash: StrictStr
+    start_lines: Optional[list[int]] = Field(default=None, max_length=80)
+
+
+class AcceptManuscriptCandidate(Input):
+    section_id: StrictStr
+    base_hash: StrictStr
+    candidate_path: StrictStr
+    candidate_hash: StrictStr
+
+
+class AuditManuscript(Input):
+    section_ids: Optional[list[StrictStr]] = Field(default=None, max_length=80)
+
+
 class MarkIssue(Input):
     report_path: StrictStr
     report_hash: StrictStr
@@ -145,6 +178,26 @@ class BuildBrief(Input):
     plan_path: StrictStr
     expected_hash: StrictStr
     mode: Literal["compact", "full"] = "compact"
+    document_path: Optional[StrictStr] = None
+    document_hash: Optional[StrictStr] = None
+
+
+class VerifyAnalysis(Input):
+    report_path: StrictStr
+    report_hash: StrictStr
+
+
+class SaveToolkit(Input):
+    expected_hash: Optional[StrictStr]
+    lexicon: list[dict] = Field(max_length=200)
+    characters: list[dict] = Field(max_length=200)
+    threads: list[dict] = Field(max_length=200)
+    style: dict
+
+
+class SemanticQuery(Input):
+    query: StrictStr = Field(min_length=1, max_length=200)
+    limit: int = Field(default=10, ge=1, le=20)
 
 
 class ExportRequest(Input):
@@ -299,8 +352,8 @@ def create_app(workspace: Path, *, frontend_dir: Optional[Path] = None, job_mana
         return save_settings(store.workspace, body.api.model_dump(), body.expected_hash)
 
     def consistent_status(project):
-        with canonical_read(project):
-            return project.status()
+        with canonical_read(project) as snapshot:
+            return dict(project.status(), canonical_revision=snapshot["revision"])
 
     @app.get("/api/projects")
     def projects():
@@ -317,7 +370,7 @@ def create_app(workspace: Path, *, frontend_dir: Optional[Path] = None, job_mana
         status = consistent_status(project)
         status.update(phase="Studio alpha", finalize_available=False,
                       single_file_approval_available=True)
-        return {"project": project.metadata, "status": status}
+        return {"project": dict(project.metadata, canonical_revision=status["canonical_revision"]), "status": status}
 
     @app.get("/api/projects/{novel_id}/documents")
     def documents(novel_id: str):
@@ -492,6 +545,38 @@ def create_app(workspace: Path, *, frontend_dir: Optional[Path] = None, job_mana
         return AnalysisStore(store.get(novel_id)).mark(
             body.report_path, body.report_hash, body.issue_id, body.status)
 
+    @app.post("/api/projects/{novel_id}/analysis/verify")
+    def verify_analysis(novel_id: str, body: VerifyAnalysis):
+        return AnalysisStore(store.get(novel_id)).verify(body.report_path, body.report_hash)
+
+    @app.get("/api/projects/{novel_id}/analysis/toolkit")
+    def writing_toolkit(novel_id: str):
+        return WritingToolkitStore(store.get(novel_id)).settings()
+
+    @app.put("/api/projects/{novel_id}/analysis/toolkit")
+    def save_writing_toolkit(novel_id: str, body: SaveToolkit):
+        return WritingToolkitStore(store.get(novel_id)).save(
+            body.model_dump(exclude={"expected_hash"}), body.expected_hash)
+
+    @app.get("/api/projects/{novel_id}/analysis/structure")
+    def story_structure(novel_id: str):
+        return WritingToolkitStore(store.get(novel_id)).structure()
+
+    @app.get("/api/projects/{novel_id}/analysis/diagnostics")
+    def writing_diagnostics(novel_id: str):
+        return WritingDiagnosticsStore(store.get(novel_id)).report()
+
+    @app.get("/api/projects/{novel_id}/analysis/semantic/status")
+    def semantic_status(novel_id: str):
+        return SemanticStore(store.get(novel_id), store.workspace).status()
+
+    @app.post("/api/projects/{novel_id}/analysis/semantic/search")
+    def semantic_search(novel_id: str, body: SemanticQuery):
+        semantic = SemanticStore(store.get(novel_id), store.workspace)
+        if not semantic.status()["available"]:
+            raise ConflictError(semantic.status()["reason"])
+        return semantic.search(body.query, body.limit)
+
     @app.get("/api/projects/{novel_id}/analysis/search")
     def search_history(novel_id: str, query: str = Query(min_length=1, max_length=200),
                        limit: int = Query(default=10, ge=1, le=20)):
@@ -499,7 +584,39 @@ def create_app(workspace: Path, *, frontend_dir: Optional[Path] = None, job_mana
 
     @app.post("/api/projects/{novel_id}/analysis/brief")
     def chapter_brief(novel_id: str, body: BuildBrief):
-        return ChapterBriefStore(store.get(novel_id)).build(body.plan_path, body.expected_hash, body.mode)
+        return ChapterBriefStore(store.get(novel_id)).build(body.plan_path, body.expected_hash, body.mode,
+                                                          document_path=body.document_path,
+                                                          document_hash=body.document_hash)
+
+    @app.get("/api/projects/{novel_id}/manuscripts")
+    def manuscripts(novel_id: str):
+        return ManuscriptStore(store.get(novel_id)).list()
+
+    @app.post("/api/projects/{novel_id}/manuscripts/preview")
+    def manuscript_preview(novel_id: str, body: ManuscriptSource):
+        return ManuscriptStore(store.get(novel_id)).preview(body.source_path, body.source_hash, body.start_lines)
+
+    @app.post("/api/projects/{novel_id}/manuscripts", status_code=201)
+    def prepare_manuscript(novel_id: str, body: ManuscriptSource):
+        return ManuscriptStore(store.get(novel_id)).prepare(body.source_path, body.source_hash, body.start_lines)
+
+    @app.get("/api/projects/{novel_id}/manuscripts/{manuscript_id}")
+    def manuscript(novel_id: str, manuscript_id: str):
+        return ManuscriptStore(store.get(novel_id)).read(manuscript_id)
+
+    @app.post("/api/projects/{novel_id}/manuscripts/{manuscript_id}/accept")
+    def accept_manuscript(novel_id: str, manuscript_id: str, body: AcceptManuscriptCandidate):
+        return ManuscriptStore(store.get(novel_id)).accept(manuscript_id, body.section_id,
+            body.base_hash, body.candidate_path, body.candidate_hash)
+
+    @app.get("/api/projects/{novel_id}/manuscripts/{manuscript_id}/export")
+    def export_manuscript(novel_id: str, manuscript_id: str):
+        return ManuscriptStore(store.get(novel_id)).export(manuscript_id)
+
+    @app.post("/api/projects/{novel_id}/manuscripts/{manuscript_id}/audit")
+    def audit_manuscript(novel_id: str, manuscript_id: str, body: AuditManuscript):
+        from vibenovel.core.manuscript_audit import ManuscriptAuditStore
+        return ManuscriptAuditStore(store.get(novel_id)).analyze(manuscript_id, body.section_ids)
 
     if frontend.is_dir():
         assets = safe_path(frontend, "assets")

@@ -53,3 +53,30 @@ metadata 保存作品 ID、首次导入文件名、字节 hash、抽取 hash、�
 生成与分析发布支持固定运行依赖 `.runtime/style-baseline.json` 的hash（未配置为null），在文档写入同一锁内核对，不开放任意运行文件读取。历史检索只读本作品正式章节，返回原句/行号/hash及未扫描范围；字词分数不证明事实或情节相同。
 
 `config/api.local.json` 的专用更新使用工作区锁、expected_hash和原子替换。密钥空输入保留、显式清除才删除；更换地址需新密钥或清除。读取只返回地址/模型/has_api_key及环境覆盖字段名，响应不含已保存密钥或片段。旧配置中的codex默认值兼容读取为api，不恢复旧执行器。
+
+
+## DSH能力完善补充（3.0.0a5）
+
+`.runtime/writing-toolkit.json` 保存作者明确登记的词表、别名、禁用/必用提示、人物检索名、伏笔关键词范围和文风要求；这些是检查偏好，不是正式设定或实际发生记忆。乐观保存绑定expected_hash，最大512KiB、每类200项。锚段最多5处，限本作品chapters/drafts，来源hash与行号、原句严格核对；过期不自动换样，也不作为角色知情或历史事件依据。全局词库不自动合并，可由作者显式复制JSON。
+
+新分析报告schema_version=2，兼容读取旧schema1而不静默迁移。新增逐规则found/returned/truncated、实际文风比较样本子集和runtime_dependencies。排除目标本身后以余下固定快照比较；人工resolved只表示作者标记。verify保存当前新报告，逐项返回remaining/not_found/unchecked，旧报告与作者标记保持；检查域、依赖或截断不确定时不假报解决。
+
+运行依赖仅允许 `.runtime/style-baseline.json` 与 `.runtime/writing-toolkit.json` 的非空子集，未配置hash为null，任务/报告发布在同一文档锁内核对。锚段另绑定实际来源hash。写前包统一所选来源及区间manifest；compact/full均不额外补回已附的全文。任务记录最终提示字符数与220000总预算，预览仅对应材料包，作者任务和通用规则的额外字符在任务预算中明确列出。
+
+记忆过去时点只接受严格chNNN（可带版本/日期后缀），或JSON顶层chapter、Markdown frontmatter chapter整数。章号冲突、无时点、未来章记录列为遗漏；记录内部误写未来事实仍需作者复核。结构看板只统计正式章字面提及和章号差，不自动写入实际人物状态或已回收伏笔。
+
+本地语义固定使用Xenova/bge-small-zh-v1.5转换版本 `75c43b069aac4d136ba6bc1122f995fedcfd2781`（原模型BAAI/bge-small-zh-v1.5，MIT）。安装显式执行，模型与分词器均校验固定SHA256；正常查询没有下载或模型API请求。可选ONNX推理在限时隔离子进程执行，只接收有界文本并返回512维归一化向量。模型目录 `.runtime-build/models/bge-small-zh-v1.5/` 及每作品 `.runtime/semantic-index.json` 都是可重建派生数据，不能代替Markdown/JSON权威。
+
+语义缓存绑定模型版本和片段hash，只保存向量，不从缓存返回原句/路径；每次返回当前正式正文的精确hash/行号/列号/片段。缓存损坏则重建，推理缺项/失败明确报错，不暗中退化为字面模式。检索前后正式revision/fingerprint变化则拒绝结果；界面刷新比对来源版本后禁用旧行号跳转，打开文稿再核对expectedHash。仍不宣称检测两个观测之间完全恢复原状的外部修改。
+
+诊断接口只输出受限枚举和固定计数、版本、相对章节路径；不序列化任务error/prompt、小说正文/书名/配置正文或任意自由文本。此报告可用于反馈；正文检索与检查报告仍属于私人作品资料。
+
+## 已有小说修订补充（3.0.0a6）
+
+修订会话清单为 `reviews/manuscript-<id>.json`，工作副本为 `drafts/manuscript-<id>/chNNN.md`。清单最后发布、创建版本保持不可变；记录完整来源hash和无遗漏的原文字符/行号分区。最多80段/8MiB，每段20万字符。来源漂移不覆盖副本，也不自动成为正式事实。准备失败可能留有版本化孤立草稿，不发布完成清单。
+
+本地批次报告复用analysis schema2的可选 `explicit_corpus` path/hash列表，限定当前会话的工作副本；复查保留相同路径集合，来源缺失/检查遗漏不能推断旧问题已解决。单批最多20目标/50万目标字符、80份/8MiB对照，报告逐份保存，返回明确coverage。批次结束复核会话、全部来源和报告失效状态。
+
+显式 `editorial`/`selection` 的审稿与改写任务保存 `editorial_context`，绑定词表/样章运行配置和原句锚段来源；不隐式加入正式历史。选区为原文Unicode字符半开区间，浏览器索引先映射回原文换行/码点。模型仅返回选区替换，后端拼成完整候选；区间外原始字节保留，恢复不二次拼接。普通旧审稿任务上下文保持兼容。
+
+接受候选须匹配当前章节路径、基文hash、成功API改写任务、全部输入与运行依赖、候选hash及 `result_version_id`。候选编辑后回退仍被拒绝。单文件journal只写修订副本，记录 `accepted_candidate` 及旧版；不修改原件、正式正文或记忆。独立导出只使用清单内副本，必要时补分章换行。
