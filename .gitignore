@@ -1,0 +1,11 @@
+.obsidian/workspace*
+.venv/
+__pycache__/
+*.pyc
+*.db
+*.sqlite3
+.chroma/
+
+# Generated temporary chapter context
+context_ch*.md
+__pycache__/
