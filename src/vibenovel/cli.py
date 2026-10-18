@@ -1,4 +1,4 @@
-"""Offline M0 CLI. Successful responses are JSON; errors have nonzero status."""
+"""Offline CLI. Successful responses are JSON; errors have nonzero status."""
 from __future__ import annotations
 
 import argparse
@@ -16,7 +16,7 @@ from .errors import VibeNovelError
 
 
 def parser() -> argparse.ArgumentParser:
-    result = argparse.ArgumentParser(description="VibeNovel v3 M0 — 离线作品管理与保真导入")
+    result = argparse.ArgumentParser(description="VibeNovel v3 — 离线作品管理与保真导入；Web 使用 vibenovel-studio")
     result.add_argument("--version", action="version", version=__version__)
     result.add_argument("--workspace", type=Path, default=Path.cwd(), help="包含 novels 的工作目录（默认当前目录）")
     sub = result.add_subparsers(dest="command", required=True)

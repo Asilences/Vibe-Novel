@@ -27,7 +27,23 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
+      - run: python -m pip install -e ".[studio,test]"
       - run: python tools/run_tests.py
       - run: python tools/check_project.py
-      - run: python -m pip install -e .
       - run: vibenovel --version
+      - run: vibenovel-studio --help
+
+  studio:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: studio
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: studio/package-lock.json
+      - run: npm ci
+      - run: npm run build
