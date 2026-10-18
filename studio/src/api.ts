@@ -62,6 +62,7 @@ export type Job = {
   context_sources?: Record<string, string>;
   recovery_available?: boolean;
   recovery_candidate?: string;
+  repair_candidate?: string;
 };
 export type Imported = {
   import_id: string;
@@ -70,6 +71,89 @@ export type Imported = {
   extracted_hash?: string;
   created_at?: string;
 };
+
+export type PlanningEvidence = {
+  path: string;
+  start_line: number;
+  end_line: number;
+  quote: string;
+};
+export type PlanningRecord = {
+  id: string;
+  title: string;
+  summary: string;
+  basis: "source_asserted" | "inferred" | "suggested";
+  evidence: PlanningEvidence[];
+};
+export type PlanningVolume = PlanningRecord & {
+  number: number;
+  chapter_start: number;
+  chapter_end: number | null;
+};
+export type PlanningChapter = PlanningRecord & {
+  number: number;
+  volume_id: string;
+  goal: string;
+  conflict: string;
+  turn: string;
+  outcome: string;
+  beats: string[];
+  character_ids: string[];
+  depends_on: string[];
+  thread_ids: string[];
+};
+export type PlanningCharacter = PlanningRecord & {
+  role: string;
+  knowledge: string;
+};
+export type PlanningRelationship = PlanningRecord & {
+  from_id: string;
+  to_id: string;
+};
+export type PlanningThread = PlanningRecord & {
+  setup_chapter: number | null;
+  payoff_chapter: number | null;
+};
+export type PlanningEvent = PlanningRecord & {
+  time: string;
+  chapter: number | null;
+  character_ids: string[];
+  status: "planned";
+};
+export type Blueprint = {
+  schema_version: 1;
+  novel_id: string;
+  source_hashes: Record<string, string>;
+  book: PlanningRecord;
+  volumes: PlanningVolume[];
+  chapters: PlanningChapter[];
+  characters: PlanningCharacter[];
+  relationships: PlanningRelationship[];
+  threads: PlanningThread[];
+  timeline: PlanningEvent[];
+  settings: (PlanningRecord & {
+    category:
+      | "world"
+      | "location"
+      | "organization"
+      | "item"
+      | "rule"
+      | "domain";
+  })[];
+  style: PlanningRecord & { rules: string[]; avoid: string[] };
+  unknowns: string[];
+};
+export type PlanningPackage = {
+  path: string;
+  hash: string | null;
+  content: string;
+  data: Blueprint | null;
+  valid: boolean;
+  issues: string[];
+  approved: boolean;
+  stale: boolean;
+};
+export type PlanningPackageSummary = Omit<PlanningPackage, "content" | "data">;
 
 let token = "";
 export const setToken = (value: string) => {
@@ -133,6 +217,7 @@ export const formatDate = (date?: string) =>
       })
     : "—";
 export const kindLabels: Record<string, string> = {
+  build_blueprint: "生成创作规划",
   expand_outline: "扩写大纲",
   draft: "章节起草",
   review: "独立审稿",

@@ -26,6 +26,7 @@ from pydantic import BaseModel, ConfigDict, Field, StrictStr
 from vibenovel import __version__
 from vibenovel.config import load_config
 from vibenovel.core.approvals import ApprovalStore
+from vibenovel.core.blueprints import PlanningStore
 from vibenovel.core.documents import ConflictError, DocumentStore, canonical_read
 from vibenovel.core.export import export_markdown
 from vibenovel.core.files import cleanup_stage, safe_path
@@ -80,13 +81,21 @@ class Decision(Input):
 
 
 class JobRequest(Input):
-    kind: Literal["expand_outline", "draft", "review", "rewrite"]
+    kind: Literal["expand_outline", "draft", "review", "rewrite", "build_blueprint"]
     provider: Literal["codex", "api"]
     document_path: StrictStr
     document_hash: StrictStr
     instruction: StrictStr = Field(default="", max_length=12000)
     plan_path: Optional[StrictStr] = None
     plan_hash: Optional[StrictStr] = None
+    planning_start: Optional[int] = Field(default=None, ge=1, le=999999)
+    planning_count: Optional[int] = Field(default=None, ge=1, le=10)
+
+
+class PlanningProposal(Input):
+    path: StrictStr
+    expected_hash: StrictStr
+    chapter_id: Optional[StrictStr] = None
 
 
 class HandoffResult(Input):
@@ -232,7 +241,7 @@ def create_app(workspace: Path, *, frontend_dir: Optional[Path] = None, job_mana
             ("codex", "Codex · 交互接力"), ("api", "API · 自动生成"))]
         return {"version": __version__, "csrf_token": token, "capabilities": {
             "default_provider": capability.get("default_provider", "api"),
-            "providers": providers, "tasks": ["expand_outline", "draft", "review", "rewrite"],
+            "providers": providers, "tasks": ["expand_outline", "draft", "review", "rewrite", "build_blueprint"],
             "limits": capability.get("limits", {})}}
 
     def consistent_status(project):
@@ -394,6 +403,18 @@ def create_app(workspace: Path, *, frontend_dir: Optional[Path] = None, job_mana
         return {"documents": [item for item in DocumentStore(store.get(novel_id)).list_documents()
                                if item["path"].startswith(("bible/", "memory/"))],
                 "semantic_extraction": "not_run"}
+
+    @app.get("/api/projects/{novel_id}/planning")
+    def planning_packages(novel_id: str):
+        return {"packages": PlanningStore(store.get(novel_id)).list()}
+
+    @app.get("/api/projects/{novel_id}/planning/package")
+    def planning_package(novel_id: str, path: str):
+        return PlanningStore(store.get(novel_id)).read(path)
+
+    @app.post("/api/projects/{novel_id}/planning/proposal", status_code=201)
+    def planning_proposal(novel_id: str, body: PlanningProposal):
+        return PlanningStore(store.get(novel_id)).propose(body.path, body.expected_hash, body.chapter_id)
 
     if frontend.is_dir():
         assets = safe_path(frontend, "assets")

@@ -71,9 +71,11 @@ import type {
   Version,
 } from "./api";
 import { Diff, Empty, IconButton, Modal, StepLabel } from "./ui";
+import PlanningWorkspace from "./PlanningWorkspace";
 
 type Area =
   | "dashboard"
+  | "planning"
   | "outlines"
   | "editor"
   | "approvals"
@@ -89,6 +91,7 @@ type ProposalDraft = {
 };
 const navItems = [
   { id: "dashboard", label: "作品总览", icon: LayoutDashboard },
+  { id: "planning", label: "创作规划", icon: Layers3 },
   { id: "outlines", label: "故事大纲", icon: ListTree },
   { id: "editor", label: "章节编辑", icon: PenLine },
   { id: "approvals", label: "作者审批", icon: ShieldCheck },
@@ -115,6 +118,7 @@ export default function App() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [project, setProject] = useState<Project | null>(null);
   const [area, setArea] = useState<Area>("dashboard");
+  const [planningPath, setPlanningPath] = useState("");
   const [documents, setDocuments] = useState<DocumentItem[]>([]);
   const [approvals, setApprovals] = useState<Approval[]>([]);
   const [jobs, setJobs] = useState<Job[]>([]);
@@ -307,6 +311,7 @@ export default function App() {
     setJobs([]);
     setImports([]);
     setArea("dashboard");
+    setPlanningPath("");
     const selected = projects.find((item) => item.novel_id === id) || null;
     setProject(selected);
     if (!id) return;
@@ -330,9 +335,23 @@ export default function App() {
       setBusy([...operations.current.values()].at(-1) || "");
     }
   }
-  async function openDocument(path: string, navigate = true, discard = false) {
+  async function openDocument(
+    path: string,
+    navigate = true,
+    discard = false,
+    line?: number,
+  ) {
     if (!project || ((path !== doc?.path || discard) && !allowLeave())) return;
     if (path === doc?.path && dirty && !discard) return;
+    if (
+      /^outlines\/(approved|proposals)\/blueprint(?:-[a-z0-9]+)?\.json$/.test(
+        path,
+      )
+    ) {
+      setPlanningPath(path);
+      setArea("planning");
+      return;
+    }
     const request = ++docRequest.current;
     const id = project.novel_id;
     const sourceAtStart = sourceRef.current;
@@ -356,6 +375,21 @@ export default function App() {
       if (navigate)
         setArea(
           isOutline(path) ? "outlines" : isMemory(path) ? "memory" : "editor",
+        );
+      if (line)
+        requestAnimationFrame(() =>
+          requestAnimationFrame(() => {
+            if (currentProject.current !== id || request !== docRequest.current)
+              return;
+            const offset = result.content
+              .split("\n")
+              .slice(0, line - 1)
+              .reduce((total, value) => total + value.length + 1, 0);
+            textarea.current?.focus();
+            textarea.current?.setSelectionRange(offset, offset);
+            if (textarea.current)
+              textarea.current.scrollTop = Math.max(0, (line - 3) * 31);
+          }),
         );
     });
   }
@@ -637,7 +671,9 @@ export default function App() {
       notify(
         decision === "approve"
           ? "作者已批准。确认后可应用到目标文件。"
-          : "提案已驳回",
+          : item.state === "approved"
+            ? "已撤销批准，提案与原审批记录仍保留。可重新创建当前版本的提案。"
+            : "提案已驳回",
       );
     });
   }
@@ -655,6 +691,8 @@ export default function App() {
       await refresh(id);
       if (currentProject.current !== id || request !== docRequest.current)
         return;
+      if (item.target === "outlines/approved/blueprint.json")
+        setPlanningPath(item.target);
       if (doc?.path === item.target) {
         const result = await api<NovelDocument>(
           `${projectUrl(id)}/document?path=${encodeURIComponent(item.target)}`,
@@ -774,12 +812,23 @@ export default function App() {
   async function completeHandoff(event: FormEvent) {
     event.preventDefault();
     if (!project || !handoff) return;
+    const id = project.novel_id;
     await act("handoff", async () => {
-      await api(
+      const result = await api<Job>(
         `${projectUrl(project.novel_id)}/jobs/${encodeURIComponent(handoff.id)}/complete`,
         "POST",
         { content: candidate },
       );
+      if (currentProject.current !== id) return;
+      if (result.state === "awaiting_input") {
+        setHandoff(result);
+        await refresh(id);
+        notify(
+          result.error || "规划结果仍未通过校验，请修正后再次提交。",
+          "error",
+        );
+        return;
+      }
       setHandoff(null);
       setCandidate("");
       await refresh(project.novel_id);
@@ -1369,6 +1418,60 @@ export default function App() {
               <span>·</span>导入内容作为参考材料
             </div>
           </div>
+        ) : area === "planning" ? (
+          <PlanningWorkspace
+            key={project.novel_id}
+            project={project}
+            documents={documents}
+            providers={bootstrap?.capabilities.providers || []}
+            provider={provider}
+            onProvider={(id) => {
+              providerChosen.current = true;
+              setProvider(id);
+            }}
+            jobs={jobs}
+            approvals={approvals}
+            initialPath={planningPath}
+            onSource={(path, line) =>
+              void openDocument(path, true, false, line)
+            }
+            onTasks={(id) => {
+              if (id) setSelectedJob(id);
+              setArea("tasks");
+            }}
+            onJob={(job) => {
+              const id = project.novel_id;
+              if (currentProject.current !== id) return;
+              setJobs((items) => [
+                job,
+                ...items.filter((item) => item.id !== job.id),
+              ]);
+              setSelectedJob(job.id);
+              setArea("tasks");
+              if (job.state === "awaiting_input") {
+                setHandoff(job);
+                setCandidate(job.repair_candidate || "");
+              }
+              void refresh(id).catch((error) =>
+                notify(errorText(error), "error"),
+              );
+              notify("创作规划任务已创建，结果将经过结构、引用与来源校验。");
+            }}
+            onProposal={(item) => {
+              const id = project.novel_id;
+              if (currentProject.current !== id) return;
+              setApprovals((items) => [
+                item,
+                ...items.filter((existing) => existing.id !== item.id),
+              ]);
+              setSelectedApproval(item.id);
+              setArea("approvals");
+              void refresh(id).catch((error) =>
+                notify(errorText(error), "error"),
+              );
+              notify("规划提案已创建。请在审批中心审阅，批准后单独应用。");
+            }}
+          />
         ) : editorArea ? (
           <div className="editor-workspace">
             {doc ? (
@@ -1469,7 +1572,9 @@ export default function App() {
                 {locked && (
                   <div className="readonly-banner">
                     <LockKeyhole size={13} />
-                    这份文件已纳入正式故事。通过「提出修改」提交差异，作者批准后应用。
+                    {doc.path.startsWith("outlines/approved/")
+                      ? "这份文件是已批准规划，描述未来安排。通过「提出修改」提交差异，作者批准后应用。"
+                      : "这份文件已纳入正式故事。通过「提出修改」提交差异，作者批准后应用。"}
                   </div>
                 )}
                 {doc.path.startsWith("imports/") && (
@@ -1734,19 +1839,37 @@ export default function App() {
                           </div>
                         </>
                       ) : approval.state === "approved" ? (
-                        <div>
-                          <span>
-                            已批准。应用时将检查目标文件是否发生变化。
-                          </span>
-                          <button
-                            className="button primary"
-                            disabled={!!busy}
-                            onClick={() => void applyProposal(approval)}
-                          >
-                            <CheckCheck size={15} />
-                            应用到目标文件
-                          </button>
-                        </div>
+                        <>
+                          <textarea
+                            aria-label="撤销批准备注"
+                            placeholder="撤销批准的备注（可选）"
+                            value={decisionNote}
+                            onChange={(event) =>
+                              setDecisionNote(event.target.value)
+                            }
+                          />
+                          <div>
+                            <span>
+                              已批准。应用时将检查目标文件是否发生变化。
+                            </span>
+                            <button
+                              className="button secondary small"
+                              disabled={!!busy}
+                              onClick={() => void decide(approval, "reject")}
+                            >
+                              <RotateCcw size={14} />
+                              撤销批准
+                            </button>
+                            <button
+                              className="button primary"
+                              disabled={!!busy}
+                              onClick={() => void applyProposal(approval)}
+                            >
+                              <CheckCheck size={15} />
+                              应用到目标文件
+                            </button>
+                          </div>
+                        </>
                       ) : (
                         <div>
                           <span>
@@ -1893,19 +2016,27 @@ export default function App() {
                       <div className="handoff-card">
                         <div>
                           <CornerDownLeft size={18} />
-                          <strong>接力上下文已就绪</strong>
+                          <strong>
+                            {selectedTask.repair_candidate
+                              ? "规划 JSON 需要修正"
+                              : "接力上下文已就绪"}
+                          </strong>
                         </div>
                         <p>
-                          复制上下文交给 Codex，完成后将结果回传为候选文稿。
+                          {selectedTask.repair_candidate
+                            ? "结构或出处校验未通过，原始结果仍保留。修正后再次校验，无需重复调用模型。"
+                            : "复制上下文交给 Codex，完成后将结果回传为候选文稿。"}
                         </p>
                         <button
                           className="button primary small"
                           onClick={() => {
                             setHandoff(selectedTask);
-                            setCandidate("");
+                            setCandidate(selectedTask.repair_candidate || "");
                           }}
                         >
-                          打开接力面板
+                          {selectedTask.repair_candidate
+                            ? "修正规划结果"
+                            : "打开接力面板"}
                           <ArrowUpRight size={14} />
                         </button>
                       </div>
@@ -1914,7 +2045,10 @@ export default function App() {
                       <button
                         className="result-card"
                         onClick={() =>
-                          void openDocument(selectedTask.result_path!)
+                          selectedTask.kind === "build_blueprint"
+                            ? (setPlanningPath(selectedTask.result_path!),
+                              setArea("planning"))
+                            : void openDocument(selectedTask.result_path!)
                         }
                       >
                         <FileText size={21} />
@@ -1987,9 +2121,15 @@ export default function App() {
                       )}
                     <div className="job-actions">
                       {selectedTask.recovery_available && (
-                        <button className="button primary small" disabled={!!busy}
-                          onClick={() => void jobAction(selectedTask, "recover")}>
-                          <RotateCcw size={14} />恢复已生成候选
+                        <button
+                          className="button primary small"
+                          disabled={!!busy}
+                          onClick={() =>
+                            void jobAction(selectedTask, "recover")
+                          }
+                        >
+                          <RotateCcw size={14} />
+                          恢复已生成候选
                         </button>
                       )}
                       {["queued", "running"].includes(selectedTask.state) && (
@@ -2108,34 +2248,38 @@ export default function App() {
                 {selectedProvider.reason}
               </p>
             )}
-            {bootstrap && provider === "api" && !selectedProvider?.available && (
-              <p className="field-hint" role="status">
-                API 尚未配置。请填写本地 <code>config/api.local.json</code> 的{" "}
-                <code>base_url</code>、<code>model</code> 和 <code>api_key</code>，
-                保存后刷新网页生效。
-              </p>
-            )}
+            {bootstrap &&
+              provider === "api" &&
+              !selectedProvider?.available && (
+                <p className="field-hint" role="status">
+                  API 尚未配置。请填写本地 <code>config/api.local.json</code> 的{" "}
+                  <code>base_url</code>、<code>model</code> 和{" "}
+                  <code>api_key</code>， 保存后刷新网页生效。
+                </p>
+              )}
             <label className="field-label">本次任务</label>
             <div className="task-options">
-              {Object.entries(kindLabels).map(([id, label]) => (
-                <button
-                  key={id}
-                  type="button"
-                  className={taskKind === id ? "selected" : ""}
-                  onClick={() => setTaskKind(id)}
-                >
-                  {id === "expand_outline" ? (
-                    <ListTree size={15} />
-                  ) : id === "draft" ? (
-                    <PenLine size={15} />
-                  ) : id === "review" ? (
-                    <ShieldCheck size={15} />
-                  ) : (
-                    <RefreshCw size={15} />
-                  )}
-                  {label}
-                </button>
-              ))}
+              {Object.entries(kindLabels)
+                .filter(([id]) => id !== "build_blueprint")
+                .map(([id, label]) => (
+                  <button
+                    key={id}
+                    type="button"
+                    className={taskKind === id ? "selected" : ""}
+                    onClick={() => setTaskKind(id)}
+                  >
+                    {id === "expand_outline" ? (
+                      <ListTree size={15} />
+                    ) : id === "draft" ? (
+                      <PenLine size={15} />
+                    ) : id === "review" ? (
+                      <ShieldCheck size={15} />
+                    ) : (
+                      <RefreshCw size={15} />
+                    )}
+                    {label}
+                  </button>
+                ))}
             </div>
             <label className="field-label" htmlFor="task-instruction">
               告诉助手，你想推进什么
@@ -2611,12 +2755,18 @@ export default function App() {
             )}
           </div>
           <div className="modal-footer">
-            <label>原件编码 <select aria-label="原件编码" value={importEncoding}
-              onChange={(event) => setImportEncoding(event.target.value)}>
-              <option value="auto">UTF-8 / BOM 自动识别</option>
-              <option value="gb18030">GB18030 / GBK</option>
-              <option value="utf-16">UTF-16</option>
-            </select></label>
+            <label>
+              原件编码{" "}
+              <select
+                aria-label="原件编码"
+                value={importEncoding}
+                onChange={(event) => setImportEncoding(event.target.value)}
+              >
+                <option value="auto">UTF-8 / BOM 自动识别</option>
+                <option value="gb18030">GB18030 / GBK</option>
+                <option value="utf-16">UTF-16</option>
+              </select>
+            </label>
             <button
               className="button primary"
               disabled={!!busy}
@@ -2630,8 +2780,12 @@ export default function App() {
       )}
       {handoff && (
         <Modal
-          title="Codex 交互接力"
-          subtitle="将上下文交给 Codex，完成后把候选结果带回这里。"
+          title={handoff.repair_candidate ? "修正规划 JSON" : "Codex 交互接力"}
+          subtitle={
+            handoff.repair_candidate
+              ? "修正结构、引用与出处后重新校验。此操作不调用模型。"
+              : "将上下文交给 Codex，完成后把候选结果带回这里。"
+          }
           onClose={() => setHandoff(null)}
           wide
         >
@@ -2639,54 +2793,71 @@ export default function App() {
             className="modal-form"
             onSubmit={(event) => void completeHandoff(event)}
           >
-            <div className="handoff-steps">
-              <StepLabel number="1">复制任务上下文</StepLabel>
-              <StepLabel number="2">在 Codex 中执行</StepLabel>
-              <StepLabel number="3">回传候选结果</StepLabel>
-            </div>
+            {handoff.repair_candidate && (
+              <div className="inline-error">
+                <CircleAlert size={15} />
+                {handoff.error || "规划结果未通过校验，请修正后回传。"}
+              </div>
+            )}
+            {!handoff.repair_candidate && (
+              <>
+                <div className="handoff-steps">
+                  <StepLabel number="1">复制任务上下文</StepLabel>
+                  <StepLabel number="2">在 Codex 中执行</StepLabel>
+                  <StepLabel number="3">回传候选结果</StepLabel>
+                </div>
+                <label>
+                  任务上下文
+                  <textarea
+                    readOnly
+                    value={
+                      handoff.handoff_prompt ||
+                      "上下文尚未返回，请刷新任务后再试。"
+                    }
+                    rows={7}
+                    className="prompt-text"
+                  />
+                </label>
+                <div className="inline-buttons">
+                  <button
+                    type="button"
+                    className="button secondary small"
+                    onClick={() => void copy(handoff.handoff_prompt || "")}
+                    disabled={!handoff.handoff_prompt}
+                  >
+                    <Copy size={14} />
+                    复制上下文
+                  </button>
+                  <button
+                    type="button"
+                    className="button secondary small"
+                    onClick={() =>
+                      download(
+                        `codex-task-${handoff.id}.md`,
+                        handoff.handoff_prompt || "",
+                      )
+                    }
+                    disabled={!handoff.handoff_prompt}
+                  >
+                    <Download size={14} />
+                    下载任务文件
+                  </button>
+                </div>
+              </>
+            )}
             <label>
-              任务上下文
-              <textarea
-                readOnly
-                value={
-                  handoff.handoff_prompt || "上下文尚未返回，请刷新任务后再试。"
-                }
-                rows={7}
-                className="prompt-text"
-              />
-            </label>
-            <div className="inline-buttons">
-              <button
-                type="button"
-                className="button secondary small"
-                onClick={() => void copy(handoff.handoff_prompt || "")}
-                disabled={!handoff.handoff_prompt}
-              >
-                <Copy size={14} />
-                复制上下文
-              </button>
-              <button
-                type="button"
-                className="button secondary small"
-                onClick={() =>
-                  download(
-                    `codex-task-${handoff.id}.md`,
-                    handoff.handoff_prompt || "",
-                  )
-                }
-                disabled={!handoff.handoff_prompt}
-              >
-                <Download size={14} />
-                下载任务文件
-              </button>
-            </div>
-            <label>
-              回传候选正文
+              {handoff.kind === "build_blueprint"
+                ? "规划 JSON 候选"
+                : "回传候选正文"}
               <textarea
                 value={candidate}
                 onChange={(event) => setCandidate(event.target.value)}
                 rows={9}
-                placeholder="在这里粘贴 Codex 生成的完整 Markdown 结果…"
+                placeholder={
+                  handoff.kind === "build_blueprint"
+                    ? "粘贴完整规划 JSON，来源与结构将重新校验…"
+                    : "在这里粘贴 Codex 生成的完整 Markdown 结果…"
+                }
                 required
               />
             </label>

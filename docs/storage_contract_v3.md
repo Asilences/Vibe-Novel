@@ -8,7 +8,7 @@
 
 每部作品含 `imports/original`、`bible`、`outlines/source`、`outlines/proposals`、`outlines/approved`、`drafts`、`chapters`、`memory/{events,states,summaries,threads}`、`approvals`、`reviews`、`exports`、`.runtime`。创建在同层临时目录完成后发布；不覆盖已存在目录。根目录旧小说资料不纳入 v3 查询。
 
-正式内容指纹覆盖 `project.json` 和 `bible/`、`outlines/approved/`、`chapters/`、`memory/` 下文件的相对路径与原字节 SHA256。路径/删除/手改会改变指纹；不包含导入、候选、草稿、导出、运行缓存。它是当前内容的 fingerprint，历史回退到相同内容会得到同值。M1 的 revision 另含提交链、审批配置、锁定约束及决定。
+正式内容指纹覆盖 `project.json` 和 `bible/`、`outlines/approved/`、`chapters/`、`memory/` 下文件的相对路径与原字节 SHA256。路径/删除/手改会改变指纹；不包含导入、候选、草稿、导出、运行缓存。它是当前内容的 fingerprint，历史回退到相同内容会得到同值。Studio 的单调 revision、历史快照与审批决定另行记录；细粒度锁定字段仍待实现。
 
 ## 原件导入
 
@@ -33,3 +33,15 @@ metadata 保存作品 ID、首次导入文件名、字节 hash、抽取 hash、�
 任务状态保存于 `.runtime/jobs/<id>.json`，不是正式小说事实；关闭浏览器不会删除，备份作品时也应保留未完成任务。每工作区 `.runtime/studio-jobs.lock` 阻止第二任务服务重复调用。运行请求重启变为中断，排队/暂停/接力状态恢复；无自动付费重试。候选返回后先持久化精确发布意图，崩溃后核对候选及来源历史，已完整保存则恢复成功；未发布则由作者显式恢复；冲突文件不覆盖。
 
 密钥可由工作区固定的 `config/api.local.json` 或后端进程环境提供，环境变量按字段优先；配置每次能力查询与执行时读取。真实配置与备份排除 Git，只有不含密钥的 `api.example.json` 可上传。HTTP 不提供密钥文件读写接口，任务中不保存凭据；无效配置只返回脱敏原因。任务上下文及恢复候选包含作品内容，仍应按本地作品资料管理；不应将 `.runtime/` 上传到公共仓库。UI不开放任意本机路径或运行命令。
+
+## 创作规划补充（3.0.0a3）
+
+规划候选是 `outlines/proposals/blueprint-<jobid>.json`，正式规划包固定为 `outlines/approved/blueprint.json`。顶层版本、作品ID、稳定记录ID、数组/文本大小、卷章范围、引用和逐行证据均受校验。运行时覆盖source_hashes；模型不能扩充未提供来源或自称AUTHOR_APPROVED。完整契约见 `blueprint_schema_v3.md`。
+
+规划的主输入只接受导入extracted文本、来源大纲或独立候选。有限正式资料可以作为上下文核对，不把它们当作可任意重写的主输入；禁止提案目标依赖自己的旧文件版本。暂不支持将批准包自身作为生成新包的主来源，也不提供局部合并。
+
+新提案可带 `dependencies` 与 `dependency_versions`，两者纳入提案hash；后者记录依赖的已观测历史/审批版本。创建、批准、应用及使用章计划时检查，保留旧记录hash兼容。整包批准不表示事件已发生；提取章计划另外创建单文件提案，依赖父包和来源。Studio内A→B→A不能使旧依赖批准复活；完全未观察到的外部回写仍在现有存储保证之外。
+
+章节起草将有效父包中与本章相关的规划人物、知情边界、文风、伏笔及时间线作为带范围说明的上下文，绑定父包hash。不能以父包规划替代正式章节事实。规划生成的无效JSON可保留在任务repair_candidate供人工修正，不发布到候选文件；修复也必须通过相同来源与结构检查，不自动发起新付费请求。
+
+未应用的已批准提案允许作者撤销批准，保留旧决定及审计事件；应用后的正式变更不能通过撤销按钮回滚，须重新创建提案。
