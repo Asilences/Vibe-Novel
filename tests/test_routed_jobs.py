@@ -32,7 +32,14 @@ class RoutedJobTests(unittest.TestCase):
         (self.workspace / "prompts/genres").mkdir(parents=True)
         (self.workspace / "prompts/genres/campus.md").write_text("校园规则", encoding="utf-8")
         (self.workspace / "prompt.md").write_text("通用规则", encoding="utf-8")
-        environment = patch.dict(os.environ, {}, clear=True)
+        # Keep the Windows runtime variables used by Winsock and urllib. Emptying
+        # the entire environment also removes NO_PROXY, which makes Windows
+        # urllib unexpectedly fall back to machine/registry proxy settings.
+        # Isolate model configuration while retaining the operating environment.
+        isolated = {name: value for name, value in os.environ.items()
+                    if not name.upper().startswith("VIBENOVEL_")}
+        isolated.update(NO_PROXY="127.0.0.1,localhost,::1", no_proxy="127.0.0.1,localhost,::1")
+        environment = patch.dict(os.environ, isolated, clear=True)
         environment.start()
         self.addCleanup(environment.stop)
         self.registry = ModelRegistry(self.workspace)
@@ -222,6 +229,18 @@ class RoutedJobTests(unittest.TestCase):
             server.shutdown()
             server.server_close()
             thread.join(2)
+
+    def test_real_http_fixture_bypasses_unavailable_ambient_proxies(self):
+        self.assertFalse(any(name.upper().startswith("VIBENOVEL_") for name in os.environ))
+        # Both local HTTP contracts must still reach their real socket servers
+        # even on runners with an unusable machine proxy or HTTP_PROXY preset.
+        proxy = "http://127.0.0.1:1"
+        with patch.dict(os.environ, {"HTTP_PROXY": proxy, "http_proxy": proxy,
+                                     "HTTPS_PROXY": proxy, "https_proxy": proxy}), \
+                patch("urllib.request.getproxies_registry", return_value={"http": proxy}, create=True) as registry:
+            self.test_adapter_sends_frozen_max_tokens_on_real_local_http()
+            self.test_response_model_records_only_valid_server_metadata()
+        registry.assert_not_called()
 
     def test_restart_preserves_unknown_reservation_without_replaying_request(self):
         calls = []
