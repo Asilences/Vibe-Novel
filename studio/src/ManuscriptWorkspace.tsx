@@ -2,8 +2,11 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { BookOpen, Check, CircleAlert, Download, FileSearch, GitCompareArrows, LoaderCircle, RefreshCw, Scissors, ShieldCheck, Sparkles, Upload } from "lucide-react";
 import { api, activeStates, download, formatDate, leaf, projectUrl, stateLabels } from "./api";
 import type { AnalysisReport, Document as NovelDocument, DocumentItem, Job, ManuscriptPreview, ManuscriptSession, ManuscriptSummary, Project, Provider } from "./api";
-import { Diff, Empty } from "./ui";
+import { Diff, Empty, Modal } from "./ui";
 import { originalSelectionRange, splitSourceLines } from "./textSelection";
+import { libraryPreviewHash, libraryTaskConfiguration } from "./libraryHelpers";
+import { JobRouteDetails } from "./MultiModelWorkspace";
+import TaskMaterialPreview from "./TaskMaterialPreview";
 
 type Props = { project: Project; documents: DocumentItem[]; jobs: Job[]; providers: Provider[]; onSettings: () => void; onImport: () => void; onRefresh: () => Promise<void>; onOpen: (path: string, line?: number, expectedHash?: string) => void; onJob: (job: Job) => void };
 type BatchAudit = { reports: AnalysisReport[]; coverage: { requested: number; analyzed: number; corpus_scanned: number; omitted: { section_id: string; path: string; reason: string }[]; source_hashes: Record<string, string>; scope: string }; limitations: string[] };
@@ -40,6 +43,7 @@ export default function ManuscriptWorkspace({ project, documents, jobs, provider
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const [taskPreview, setTaskPreview] = useState<{ request: Record<string, unknown>; route: Record<string, unknown> } | null>(null);
   const alive = useRef(true);
   const requests = useRef({ session: 0, document: 0, result: 0 });
   const documentRef = useRef(document); documentRef.current = document;
@@ -141,10 +145,21 @@ export default function ManuscriptWorkspace({ project, documents, jobs, provider
       if (!document || docStale) throw new Error("请先重新读取当前副本。");
       if (rangeEnabled && !rangeValid) throw new Error("请明确选择有效文本范围；起点包含、终点不包含。");
       if (!goals.length) throw new Error("请至少选择一项编辑目标。");
-      const value = await api<Job>(`${projectUrl(project.novel_id)}/jobs`, "POST", { kind, provider: "api", document_path: document.path, document_hash: document.hash, instruction: instruction.trim(), editorial: { goals, intensity }, ...(rangeEnabled ? { selection: { start_char: start, end_char: end } } : {}) });
+      const request = { kind, provider: "api", document_path: document.path, document_hash: document.hash, instruction: instruction.trim(), editorial: { goals, intensity }, ...(rangeEnabled ? { selection: { start_char: start, end_char: end } } : {}), idempotency_key: crypto.randomUUID() };
+      const route = await api<Record<string, unknown>>(`${projectUrl(project.novel_id)}/jobs/preview`, "POST", request);
       if (!alive.current) return;
-      setSelectedJobId(value.id); setCandidate(null); onJob(value);
-      setNotice(kind === "review" ? "已提交 API 证据审稿，任务完成后在下方查看。" : "已提交编辑任务，完成后需审阅差异并显式接受到副本。");
+      setTaskPreview({ request, route });
+    });
+  }
+  async function submitPreview() {
+    if (!taskPreview || busy) return;
+    await perform("submit", async () => {
+      const value = await api<Job>(`${projectUrl(project.novel_id)}/jobs`, "POST", { ...taskPreview.request,
+        expected_configuration: libraryTaskConfiguration(taskPreview.route),
+        expected_library_hash: libraryPreviewHash(taskPreview.route) });
+      if (!alive.current) return;
+      setTaskPreview(null); setSelectedJobId(value.id); setCandidate(null); onJob(value);
+      setNotice("已提交 API 任务；结果需审阅后决定是否接受到修订副本。");
     });
   }
   async function accept() {
@@ -163,6 +178,7 @@ export default function ManuscriptWorkspace({ project, documents, jobs, provider
     setStart(range.start_char); setEnd(range.end_char); setRangeEnabled(true);
   }
   return <div className="manuscript-workspace scroll-area">
+    {taskPreview && <Modal title="审稿与编辑任务预览" subtitle="确认后才调用模型。使用下方固定的文稿、资料与配置版本。" wide onClose={() => { if (!busy) setTaskPreview(null); }}><JobRouteDetails route={taskPreview.route} /><TaskMaterialPreview route={taskPreview.route} />{error && <p className="inline-error">{error}；提交不确定时请先核对任务记录，重试沿用同一幂等键。</p>}<div className="modal-footer"><button className="button primary" disabled={!!busy || !libraryTaskConfiguration(taskPreview.route)} onClick={() => void submitPreview()}>确认并提交任务</button></div></Modal>}
     <div className="page-heading compact-heading"><div><div className="eyebrow">REVISION, WITH YOUR VOICE INTACT</div><h1>已有小说修订</h1><p>从原稿建立独立副本，逐章审稿、比较改写，再由你接受。</p></div><button type="button" className="button secondary small" onClick={onImport}><Upload size={15} />导入原稿</button></div>
     <div className="analysis-local-note"><ShieldCheck size={15} />编辑目标描述可观察的文字问题。此工作流不提供 AI 概率或检测分数。</div>
     {error && <div className="analysis-error" role="alert"><CircleAlert size={16} />{error}</div>}{notice && <p className="analysis-success" role="status">{notice}</p>}

@@ -76,6 +76,9 @@ import APISettings from "./APISettings";
 import ManuscriptWorkspace from "./ManuscriptWorkspace";
 import MultiModelWorkspace, { JobRouteDetails } from "./MultiModelWorkspace";
 import CreationWorkspace from "./CreationWorkspace";
+import LibraryWorkspace from "./LibraryWorkspace";
+import TaskMaterialPreview from "./TaskMaterialPreview";
+import { libraryPreviewHash, libraryTaskConfiguration } from "./libraryHelpers";
 
 type Area =
   | "dashboard"
@@ -86,6 +89,7 @@ type Area =
   | "planning"
   | "analysis"
   | "manuscript"
+  | "library"
   | "models"
   | "outlines"
   | "editor"
@@ -113,7 +117,8 @@ const navItems = [
   { id: "approvals", label: "待审变更", icon: ShieldCheck, group: "作者决定" },
   { id: "models", label: "模型与角色", icon: Settings2, group: "辅助工具" },
   { id: "outlines", label: "大纲文稿", icon: FileText, group: "辅助工具" },
-  { id: "memory", label: "正式记忆与资料", icon: FolderOpen, group: "辅助工具" },
+  { id: "library", label: "资料中心", icon: Library, group: "辅助工具" },
+  { id: "memory", label: "正式设定与记忆", icon: FolderOpen, group: "辅助工具" },
   { id: "tasks", label: "任务记录", icon: Activity, group: "辅助工具" },
 ] as const;
 const genreLabels: Record<string, string> = {
@@ -137,6 +142,9 @@ export default function App() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [project, setProject] = useState<Project | null>(null);
   const [area, setArea] = useState<Area>("dashboard");
+  const [libraryTarget, setLibraryTarget] = useState<{ view: "all" | "sources" | "method"; entry?: string; nonce: number }>({ view: "all", nonce: 0 });
+  const [taskPreview, setTaskPreview] = useState<{ body: Record<string, unknown>; route: Record<string, unknown>; novelId: string } | null>(null);
+  const [taskUncertain, setTaskUncertain] = useState(false);
   const [planningPath, setPlanningPath] = useState("");
   const [planningSource, setPlanningSource] = useState("");
   const [childDirty, setChildDirty] = useState(false);
@@ -324,8 +332,8 @@ export default function App() {
     return () => clearInterval(timer);
   }, [project, documents, refresh]);
 
-  async function selectProject(id: string) {
-    if (!allowLeave()) return;
+  async function selectProject(id: string, approved = false) {
+    if (!approved && !allowLeave()) return;
     currentProject.current = id;
     docRequest.current += 1;
     setDoc(null);
@@ -799,35 +807,37 @@ export default function App() {
       notify("请先保存当前文稿，让任务使用明确的已保存版本。", "error");
       return;
     }
-    await act("task", async () => {
-      const result = await api<Job>(
-        `${projectUrl(project.novel_id)}/jobs`,
-        "POST",
-        {
-          kind: taskKind,
-          provider: "api",
-          document_path: doc.path,
-          document_hash: doc.hash,
-          instruction: instruction.trim(),
-          ...(taskKind === "draft"
-            ? {
-                plan_path: planPath,
-                brief_mode: briefMode,
-                plan_hash: approvedPlans.find((item) => item.path === planPath)
-                  ?.hash,
-              }
-            : {}),
-        },
-      );
-      await refresh(project.novel_id);
-      setSelectedJob(result.id);
-      setArea("tasks");
-      if (result.provider === "api" && result.kind === "build_blueprint" && result.repair_candidate && result.state === "awaiting_input") {
-        setRepairJob(result);
-        setCandidate("");
-      }
-      notify("任务已提交，可在任务记录中查看真实状态");
+    await act("task-preview", async () => {
+      const body = { kind: taskKind, provider: "api", document_path: doc.path, document_hash: doc.hash, instruction: instruction.trim(), idempotency_key: crypto.randomUUID(), ...(taskKind === "draft" ? { plan_path: planPath, brief_mode: briefMode, plan_hash: approvedPlans.find((item) => item.path === planPath)?.hash } : {}) };
+      const route = await api<Record<string, unknown>>(`${projectUrl(project.novel_id)}/jobs/preview`, "POST", body);
+      setTaskPreview({ body, route, novelId: project.novel_id }); setTaskUncertain(false);
     });
+  }
+  async function confirmTask() {
+    if (!taskPreview || busy) return;
+    const saved = taskPreview;
+    await act("task", async () => {
+      let result: Job;
+      try { result = await api<Job>(`${projectUrl(saved.novelId)}/jobs`, "POST", { ...saved.body, expected_configuration: libraryTaskConfiguration(saved.route), expected_library_hash: libraryPreviewHash(saved.route) }); }
+      catch (failure) { if (failure instanceof ApiError && failure.status < 500) setTaskPreview(null); else setTaskUncertain(true); throw failure; }
+      setTaskPreview(null); setTaskUncertain(false);
+      if (currentProject.current !== saved.novelId) return;
+      await refresh(saved.novelId); setSelectedJob(result.id); setArea("tasks");
+      if (result.provider === "api" && result.kind === "build_blueprint" && result.repair_candidate && result.state === "awaiting_input") { setRepairJob(result); setCandidate(""); }
+      notify("任务已提交，可在任务记录中查看实际资料来源与状态");
+    });
+  }
+  async function openLibrary(novelId: string, entryId?: string) {
+    if (!allowLeave()) return;
+    if (project?.novel_id !== novelId) await selectProject(novelId, true);
+    if (currentProject.current !== novelId) return;
+    setLibraryTarget({ view: entryId ? "all" : "method", entry: entryId, nonce: Date.now() }); setArea("library");
+  }
+  async function openLibraryTasks(novelId: string, jobId?: string) {
+    if (!allowLeave()) return;
+    if (project?.novel_id !== novelId) await selectProject(novelId, true);
+    if (currentProject.current !== novelId) return;
+    setSelectedJob(jobId || ""); setArea("tasks");
   }
   async function jobAction(
     job: Job,
@@ -1155,9 +1165,8 @@ export default function App() {
           <button onClick={() => setShowSettings(true)}><Settings2 size={16} /><span>模型与 API 设置</span><ArrowUpRight size={13} /></button>
           <button
             onClick={() => {
-              if (project) setShowSources(true);
+              if (!allowLeave()) return; setLibraryTarget({ view: "sources", nonce: Date.now() }); setArea("library");
             }}
-            disabled={!project}
           >
             <FolderOpen size={16} />
             <span>来源资料</span>
@@ -1220,6 +1229,8 @@ export default function App() {
             <LoaderCircle className="spin" size={22} />
             <p>正在打开作者工作台…</p>
           </div>
+        ) : area === "library" ? (
+          <LibraryWorkspace key={`${project?.novel_id || "personal"}-${libraryTarget.nonce}`} project={project} projects={projects} initialView={libraryTarget.view} initialEntry={libraryTarget.entry} onLibrary={(id, entry) => void openLibrary(id, entry)} onSettings={() => setShowSettings(true)} onDirtyChange={setChildDirty} onJob={(job, id) => { if (project?.novel_id === id) setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)]); }} onTasks={(id, jobId) => void openLibraryTasks(id, jobId)} onLegacySources={() => setShowSources(true)} />
         ) : !project ? (
           <div className="onboarding">
             <div className="onboarding-kicker">
@@ -2085,6 +2096,8 @@ export default function App() {
                       </div>
                     )}
                     {selectedTask.provider !== "api" && <p className="field-hint">这是旧执行方式的历史任务。可查看记录或取消，后续任务统一通过 API 执行。</p>}
+                    {selectedTask.result_library && <button className="result-card" onClick={() => void openLibrary(project.novel_id, selectedTask.result_library?.methods?.[0]?.id || selectedTask.result_library?.analysis?.id)}><Library size={21} /><span><strong>查看资料分析与方法候选</strong><small>候选归库；采用不改变正式正文或记忆</small></span><ArrowUpRight size={17} /></button>}
+                    {selectedTask.library_manifest && <details className="job-section"><summary>本次资料装配与遗漏</summary><LibraryManifest value={selectedTask.library_manifest} /></details>}
                     {selectedTask.result_path && (
                       <button
                         className="result-card"
@@ -2212,10 +2225,10 @@ export default function App() {
                         <button
                           className="button secondary small"
                           disabled={!!busy}
-                          onClick={() => selectedTask.kind === "generate_story_outline" ? navigate("creation") : void jobAction(selectedTask, "retry")}
+                          onClick={() => selectedTask.kind === "generate_story_outline" ? navigate("creation") : ["analyze_reference", "extract_methods"].includes(selectedTask.kind) ? void openLibrary(project.novel_id) : void jobAction(selectedTask, "retry")}
                         >
                           <RotateCcw size={14} />
-                          {selectedTask.kind === "generate_story_outline" ? "返回构思，重新预览" : "重试任务"}
+                          {selectedTask.kind === "generate_story_outline" ? "返回构思，重新预览" : ["analyze_reference", "extract_methods"].includes(selectedTask.kind) ? "回资料中心重新预览" : "重试任务"}
                         </button>
                       )}
                     </div>
@@ -2802,6 +2815,7 @@ export default function App() {
           </form>
         </Modal>
       )}
+      {taskPreview && <Modal title="确认本次模型任务" subtitle="预览不会调用模型；确认后按固定文稿、模型与资料版本提交。" wide onClose={() => { if (!busy && (!taskUncertain || window.confirm("提交结果仍不明确。关闭后请先在任务记录核对，避免重复发起。"))) setTaskPreview(null); }}><JobRouteDetails route={taskPreview.route} /><TaskMaterialPreview route={taskPreview.route} />{taskUncertain && <p className="inline-error">请求结果尚不明确。先核对任务记录；此按钮沿用原幂等键核对并重试。</p>}<div className="modal-footer"><button className="button primary" disabled={!!busy || !libraryTaskConfiguration(taskPreview.route)} onClick={() => void confirmTask()}><Play size={14} />{taskUncertain ? "沿用原键核对并重试" : "确认并开始任务"}</button></div></Modal>}
       {showSettings && <APISettings onClose={() => setShowSettings(false)} onModels={() => { if (navigate("models")) setShowSettings(false); }} onSaved={async () => { const boot = await api<Bootstrap>("/bootstrap"); setBootstrap(boot); setToken(boot.csrf_token); }} />}
       {exportRange && (
         <Modal
@@ -2861,4 +2875,12 @@ export default function App() {
       )}
     </div>
   );
+}
+
+function LibraryManifest({ value }: { value: unknown }) {
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return <span>{String(value)}</span>;
+  if (Array.isArray(value)) return <ul>{value.map((item, index) => <li key={index}><LibraryManifest value={item} /></li>)}</ul>;
+  if (!value || typeof value !== "object") return null;
+  const labels: Record<string, string> = { notice: "说明", mode: "选材模式", purpose: "任务用途", selected: "实际选入", omitted: "未选与原因", recommended: "仅推荐", entries: "资料条目", snapshot: "固定版本", title: "标题", quote: "原句", content: "资料内容", reason: "原因", hash: "版本校验", summary: "摘要", source_refs: "原句依据", outbound: "外发范围", start_char: "开始字符", end_char: "结束字符", source_id: "来源", source_version_id: "来源版本", scope: "资料库", policy: "本书选材策略" };
+  return <dl className="detail-table">{Object.entries(value as Record<string, unknown>).map(([key, item]) => <div key={key}><dt>{labels[key] || key}</dt><dd><LibraryManifest value={item} /></dd></div>)}</dl>;
 }

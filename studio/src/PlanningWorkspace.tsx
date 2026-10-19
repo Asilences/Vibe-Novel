@@ -42,6 +42,9 @@ import type {
   Provider,
 } from "./api";
 import { Empty, IconButton, Modal } from "./ui";
+import { libraryPreviewHash, libraryTaskConfiguration } from "./libraryHelpers";
+import { JobRouteDetails } from "./MultiModelWorkspace";
+import TaskMaterialPreview from "./TaskMaterialPreview";
 
 type Props = {
   project: Project;
@@ -360,6 +363,7 @@ export default function PlanningWorkspace({
   const [loadingPackage, setLoadingPackage] = useState(false);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
+  const [taskPreview, setTaskPreview] = useState<{ request: Record<string, unknown>; route: Record<string, unknown> } | null>(null);
   const [editing, setEditing] = useState<{
     path: string;
     hash: string;
@@ -513,7 +517,7 @@ export default function PlanningWorkspace({
     setBusy("generate");
     setError("");
     try {
-      const job = await api<Job>(`${base}/jobs`, "POST", {
+      const request = {
         kind: "build_blueprint",
         provider: "api",
         document_path: source.path,
@@ -521,9 +525,11 @@ export default function PlanningWorkspace({
         planning_start: start,
         planning_count: count,
         instruction: instruction.trim(),
-      });
+        idempotency_key: crypto.randomUUID(),
+      };
+      const route = await api<Record<string, unknown>>(`${base}/jobs/preview`, "POST", request);
       if (!alive.current) return;
-      onJob(job);
+      setTaskPreview({ request, route });
     } catch (failure) {
       if (alive.current) {
         setError(message(failure));
@@ -532,6 +538,17 @@ export default function PlanningWorkspace({
     } finally {
       if (alive.current) setBusy("");
     }
+  }
+  async function submitPreview() {
+    if (!taskPreview || busy) return;
+    setBusy("submit"); setError("");
+    try {
+      const job = await api<Job>(`${base}/jobs`, "POST", { ...taskPreview.request,
+        expected_configuration: libraryTaskConfiguration(taskPreview.route),
+        expected_library_hash: libraryPreviewHash(taskPreview.route) });
+      if (alive.current) { setTaskPreview(null); onJob(job); }
+    } catch (failure) { if (alive.current) setError(message(failure)); }
+    finally { if (alive.current) setBusy(""); }
   }
   function closeEditing() {
     if (busy === "save-package") return;
@@ -601,6 +618,7 @@ export default function PlanningWorkspace({
     : "候选规划 · 待作者审阅";
   return (
     <div className="planning-workspace scroll-area">
+      {taskPreview && <Modal title="创作规划任务预览" subtitle="核对模型、预算与实际补充资料，确认后才调用 API。" wide onClose={() => { if (!busy) setTaskPreview(null); }}><p>来源：{String(taskPreview.request.document_path)}；计划 {String(taskPreview.request.planning_start)} 起的 {String(taskPreview.request.planning_count)} 章。</p><JobRouteDetails route={taskPreview.route} /><TaskMaterialPreview route={taskPreview.route} />{error && <p className="inline-error">{error}；提交不确定时请先核对任务记录，重试沿用同一幂等键。</p>}<div className="modal-footer"><button type="button" className="button primary" disabled={!!busy || !libraryTaskConfiguration(taskPreview.route)} onClick={() => void submitPreview()}>确认并生成候选规划</button></div></Modal>}
       <div className="page-heading compact-heading">
         <div>
           <div className="eyebrow">BLUEPRINT BEFORE THE FIRST WORD</div>
@@ -725,7 +743,7 @@ export default function PlanningWorkspace({
               ) : (
                 <Sparkles size={14} />
               )}
-              生成创作规划
+              预览创作规划
               <ArrowRight size={13} />
             </button>
           </div>

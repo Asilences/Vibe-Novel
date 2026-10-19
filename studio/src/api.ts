@@ -69,8 +69,46 @@ export type Job = {
   repair_candidate?: string;
   result_hash?: string;
   result_version_id?: string;
+  result_library?: { bundle_id: string; analysis?: LibraryEntry | null; methods?: LibraryEntry[]; entries: LibraryEntry[] };
+  library_manifest?: Record<string, unknown>;
   editorial_context?: { selection?: { start_char: number; end_char: number }; goals: string[]; intensity: string; sources: Record<string, string>; omitted: unknown[]; runtime_sources?: Record<string, string>; prompt_budget?: { characters: number; limit: number } };
 };
+
+export type LibraryScope = "personal" | "book";
+export type LibraryType = "literature" | "material" | "technique" | "style" | "term" | "method";
+export type LibraryOutbound = "local" | "summary" | "excerpts";
+export type LibrarySourceRef = { source_id: string; source_version_id: string; start_char: number; end_char: number; quote: string; scope?: LibraryScope; owner?: string };
+export type LibraryMethod = { purpose: string; steps: string[]; inputs: string[]; outputs: string[]; limitations: string[]; applies_to: string[]; counterexamples: string[]; checks: string[] };
+export type LibraryEntry = {
+  id: string; type: LibraryType; title: string; content: string; tags: string[]; summary: string;
+  outbound: LibraryOutbound; status: "inbox" | "ready" | "archived";
+  verification: "unverified" | "checked" | "disputed" | "needs_evidence";
+  provenance: "AUTHOR" | "AI_SUGGESTED"; source_refs: LibrarySourceRef[]; method?: LibraryMethod;
+  analysis?: Record<string, unknown>; adopted?: boolean; adoption?: Record<string, unknown> | null;
+  version_id: string; hash: string; revision: number; created_at?: string; updated_at?: string;
+  [key: string]: unknown;
+};
+export type LibrarySourceMetadata = { title: string; author: string; edition: string; url: string; doi: string; license: string; notes: string; outbound: LibraryOutbound; withdrawn?: boolean; reason?: string };
+export type LibrarySource = {
+  id: string; title?: string; filename?: string; original_name?: string; text?: string; content?: string;
+  metadata: LibrarySourceMetadata; version_id: string; hash: string; revision: number;
+  characters?: number; source_hash?: string; extracted_hash?: string; withdrawn?: boolean; withdrawal_reason?: string; outbound?: LibraryOutbound;
+  [key: string]: unknown;
+};
+export type LibraryCollection = { id: string; title: string; description: string; entry_ids: string[]; hash: string; version_id: string; revision: number };
+export type LibraryQuestion = { id: string; title: string; question: string; notes: string; status: "open" | "resolved" | "disputed"; entry_ids: string[]; hash: string; version_id: string; revision: number };
+export type LibraryPolicy = { mode: "manual" | "recommend" | "auto"; types: LibraryType[]; purposes: string[]; collections: string[]; required_ids: string[]; excluded_ids: string[]; max_items: number; max_characters: number };
+export type LibraryBinding = { id: string; entry_id?: string; source_scope?: LibraryScope; purpose?: string; hash: string; version_id: string; snapshot?: LibraryEntry; entry?: LibraryEntry; stale?: boolean; withdrawn?: boolean; [key: string]: unknown };
+export type LibraryOverview = { scope: LibraryScope; owner?: string; revision: number; hash: string | null; entries: LibraryEntry[]; sources: LibrarySource[]; collections: LibraryCollection[]; questions: LibraryQuestion[]; bindings: LibraryBinding[]; policy?: LibraryPolicy; policy_hash?: string | null };
+export type LibraryHistoryVersion = { version_id?: string; id?: string; hash: string; revision?: number; created_at?: string; [key: string]: unknown };
+export function libraryUrl(scope: LibraryScope, novelId?: string, tail = ""): string {
+  return `/library/${scope}${tail}${scope === "book" ? `?novel_id=${encodeURIComponent(novelId || "")}` : ""}`;
+}
+export function libraryQuery(scope: LibraryScope, novelId: string | undefined, tail: string, fields: Record<string, string | undefined>): string {
+  const query = new URLSearchParams(scope === "book" ? { novel_id: novelId || "" } : {});
+  for (const [key, value] of Object.entries(fields)) if (value !== undefined && value !== "") query.set(key, value);
+  return `/library/${scope}${tail}${query.size ? `?${query}` : ""}`;
+}
 export type ModelRole = "planner" | "writer" | "reviewer" | "memory";
 export type ModelProfile = {
   id: string; label: string; base_url: string; model: string; allow_loopback: boolean;
@@ -354,6 +392,8 @@ export const formatDate = (date?: string) =>
       })
     : "—";
 export const kindLabels: Record<string, string> = {
+  analyze_reference: "分析资料原文",
+  extract_methods: "提炼创作方法",
   generate_story_outline: "生成初版总纲",
   build_blueprint: "生成创作规划",
   expand_outline: "扩写大纲",

@@ -203,7 +203,7 @@ class CreationJobTests(unittest.TestCase):
         summary = BudgetLedger(self.project).public(late["route"]["group_id"])
         self.assertEqual((summary["calls"], summary["tokens"]), (1, 18))
 
-    def test_wrong_path_version_and_noncreation_idempotency_are_rejected(self):
+    def test_wrong_path_version_and_invalid_idempotency_are_rejected(self):
         manager = self.manager(object())
         for changes in ({"document_path": "outlines/source/other.json"},
                         {"document_version_id": "0" * 32}, {"planning_count": 1},
@@ -211,9 +211,12 @@ class CreationJobTests(unittest.TestCase):
             with self.subTest(changes=changes), self.assertRaises(VibeNovelError):
                 self.submit(manager, dict(self.request(), **changes))
         source = self.documents.save("outlines/source/old.md", "原有大纲", None)
+        preview = manager.preview(self.project, {"kind": "expand_outline", "document_path": source["path"],
+            "document_hash": source["hash"], "idempotency_key": "valid-existing-kind"})
+        self.assertEqual(preview["role"], "planner")
         with self.assertRaises(VibeNovelError):
-            self.submit(manager, {"kind": "expand_outline", "document_path": source["path"],
-                "document_hash": source["hash"], "idempotency_key": "not-for-existing-kind"})
+            manager.preview(self.project, {"kind": "expand_outline", "document_path": source["path"],
+                "document_hash": source["hash"], "idempotency_key": "short"})
 
     def test_author_edited_candidate_usable_until_origin_brief_version_changes(self):
         class Provider:

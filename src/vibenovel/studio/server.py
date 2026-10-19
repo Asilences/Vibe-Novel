@@ -45,6 +45,7 @@ from .settings import public_settings, save_settings
 from .model_registry import ModelRegistry
 from .routing import ProjectRouting
 from .workflows import WorkflowManager
+from .library_api import install_library_routes
 
 MAX_REQUEST_BYTES = 15 * 1024 * 1024
 LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
@@ -119,10 +120,10 @@ class EditorialOptions(Input):
 
 
 class JobRequest(Input):
-    kind: Literal["generate_story_outline", "expand_outline", "draft", "review", "rewrite", "build_blueprint", "review_evidence", "memory_delta"]
+    kind: Literal["generate_story_outline", "expand_outline", "draft", "review", "rewrite", "build_blueprint", "review_evidence", "memory_delta", "analyze_reference", "extract_methods"]
     provider: Literal["api"] = "api"
     document_path: Optional[StrictStr] = None
-    document_hash: StrictStr
+    document_hash: Optional[StrictStr] = None
     document_version_id: Optional[StrictStr] = None
     idempotency_key: Optional[StrictStr] = Field(default=None, max_length=128)
     expected_configuration: Optional[dict] = None
@@ -134,6 +135,14 @@ class JobRequest(Input):
     brief_mode: Optional[Literal["compact", "full"]] = None
     selection: Optional[EditorialSelection] = None
     editorial: Optional[EditorialOptions] = None
+    library_scope: Optional[Literal["personal", "book"]] = None
+    source_ranges: Optional[list[dict]] = Field(default=None, max_length=40)
+    purpose: Optional[Literal["scene_beats", "character_motivation", "suspense", "expression_review", "professional_method"]] = None
+    analysis_entry_id: Optional[StrictStr] = None
+    analysis_version_id: Optional[StrictStr] = None
+    method_run_id: Optional[StrictStr] = None
+    library_selection: Optional[dict] = None
+    expected_library_hash: Optional[StrictStr] = None
 
 
 class PlanningProposal(Input):
@@ -370,6 +379,7 @@ def create_app(workspace: Path, *, frontend_dir: Optional[Path] = None, job_mana
     app.state.jobs = jobs
     app.state.workspace = store.workspace
     app.add_middleware(LocalBoundary, token=token)
+    install_library_routes(app, store.workspace, store)
 
     @app.exception_handler(ConflictError)
     async def conflict_error(request, exc):
@@ -404,7 +414,7 @@ def create_app(workspace: Path, *, frontend_dir: Optional[Path] = None, job_mana
         providers = [dict(capability["api"], id="api", label="API · 自动生成")]
         return {"version": __version__, "csrf_token": token, "capabilities": {
             "default_provider": capability.get("default_provider", "api"),
-            "providers": providers, "tasks": ["generate_story_outline", "expand_outline", "draft", "review", "rewrite", "build_blueprint", "review_evidence", "memory_delta"],
+            "providers": providers, "tasks": ["generate_story_outline", "expand_outline", "draft", "review", "rewrite", "build_blueprint", "review_evidence", "memory_delta", "analyze_reference", "extract_methods"],
             "limits": capability.get("limits", {})}}
 
     @app.get("/api/settings")
@@ -439,7 +449,7 @@ def create_app(workspace: Path, *, frontend_dir: Optional[Path] = None, job_mana
     @app.post("/api/projects/{novel_id}/routes/preview")
     def route_preview(novel_id: str, body: JobRequest):
         project = store.get(novel_id)
-        request = body.model_dump(exclude_none=True, exclude={"expected_configuration"})
+        request = body.model_dump(exclude_none=True, exclude={"expected_configuration", "expected_library_hash"})
         return (jobs.creation_preview(project, request) if body.kind == "generate_story_outline"
                 else jobs.preview(project, request))
 
@@ -643,10 +653,11 @@ def create_app(workspace: Path, *, frontend_dir: Optional[Path] = None, job_mana
     @app.post("/api/projects/{novel_id}/jobs", status_code=201)
     def submit_job(novel_id: str, body: JobRequest):
         project = store.get(novel_id)
-        request = body.model_dump(exclude_none=True, exclude={"expected_configuration"})
+        request = body.model_dump(exclude_none=True, exclude={"expected_configuration", "expected_library_hash"})
         if body.kind == "draft" and body.plan_path and body.plan_hash is None:
             request["plan_hash"] = ApprovalStore(project).approved_outline(body.plan_path)["hash"]
-        return jobs.submit(project, request, expected_configuration=body.expected_configuration)
+        return jobs.submit(project, request, expected_configuration=body.expected_configuration,
+                           expected_library_hash=body.expected_library_hash)
 
     @app.get("/api/projects/{novel_id}/jobs/{job_id}")
     def job_detail(novel_id: str, job_id: str):

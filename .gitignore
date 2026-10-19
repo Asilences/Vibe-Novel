@@ -29,3 +29,7 @@ studio/dist/
 
 # Studio API and GitHub credentials stay on this computer
 /config/*.local.json*
+
+# Private source libraries, excerpts, method candidates and their indexes
+/library/
+/novels/*/library/
