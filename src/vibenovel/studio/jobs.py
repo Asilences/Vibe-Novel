@@ -19,7 +19,9 @@ from vibenovel.errors import VibeNovelError
 from .providers import GenerationResult, OpenAICompatibleProvider, ProviderCancelled, ProviderError
 from .providers import capabilities as provider_capabilities
 
-KINDS = ("expand_outline", "draft", "review", "rewrite", "build_blueprint", "review_evidence", "memory_delta", "generate_story_outline")
+from .method_jobs import METHOD_KINDS
+
+KINDS = ("expand_outline", "draft", "review", "rewrite", "build_blueprint", "review_evidence", "memory_delta", "generate_story_outline") + METHOD_KINDS
 EDITORIAL_GOALS = ("remove_cliches", "reduce_repetition", "show_actions", "natural_dialogue", "preserve_voice")
 EDITORIAL_INTENSITIES = ("conservative", "standard", "deep")
 _GOAL_LABELS = {"remove_cliches": "减少套话和模板化表达", "reduce_repetition": "减少无新信息的文字重复",
@@ -257,13 +259,13 @@ class JobManager:
     def _public(job):
         result = copy.deepcopy({key: value for key, value in job.items() if not key.startswith("_")})
         result.pop("handoff_prompt", None)  # Legacy records remain on disk, not an executable workflow.
-        pending = job.get("_pending_result")
+        pending = job.get("_pending_result") or job.get("_pending_library_result")
         result["recovery_available"] = bool(pending and job["state"] == "interrupted" and job["provider"] == "api")
         result.pop("recovery_candidate", None)
         if job["provider"] != "api":
             result.pop("repair_candidate", None)
         if result["recovery_available"]:
-            result["recovery_candidate"] = pending["content"]
+            result["recovery_candidate"] = pending.get("content") or json.dumps(pending.get("bundle"), ensure_ascii=False, indent=2)
         return result
 
     @staticmethod
@@ -311,6 +313,8 @@ class JobManager:
                     self._persist(project, job)
                 if job.get("_pending_result") and job["state"] != "succeeded" and job["provider"] == "api":
                     self._recover_pending(project, job)
+                if job.get("_pending_library_result") and job["state"] != "succeeded" and job["provider"] == "api":
+                    self._recover_library_pending(project, job)
                 if job["state"] == "running":
                     job["state"] = "interrupted"
                     job.pop("_run_token", None)
@@ -347,7 +351,7 @@ class JobManager:
     def _recover_pending(self, project, job):
         """Reconcile a durable publication intent, without another model request."""
         pending = self._pending_result(job)
-        if (job["kind"] == "generate_story_outline"
+        if ("library_context" in job or job["kind"] == "generate_story_outline"
                 or job["kind"] == "build_blueprint" and job.get("creation_origin")):
             try:
                 self._validate_snapshot(project, job)
@@ -473,11 +477,26 @@ class JobManager:
             return self._public(self._get(project, job_id))
 
     def _prepare(self, project, request):
+        prepared = self._prepare_base(project, request)
+        if prepared[0]["kind"] in METHOD_KINDS:
+            return prepared
+        from .method_jobs import assemble
+        normalized, prompt, sources, fingerprint, revision, context = prepared
+        selection = normalized.get("library_selection")
+        prompt, library = assemble(self.workspace, project, normalized["kind"], prompt, selection,
+                                   query=normalized.get("instruction") or prompt[:200])
+        if library is not None:
+            context = dict(context or {})
+            context["library_context"] = library
+        return normalized, prompt, sources, fingerprint, revision, context
+
+    def _prepare_base(self, project, request):
         if not isinstance(request, dict):
             raise VibeNovelError("任务请求需要对象")
         allowed = {"kind", "provider", "document_path", "document_hash", "instruction", "plan_path", "plan_hash",
                    "planning_start", "planning_count", "brief_mode", "selection", "editorial",
-                   "document_version_id", "idempotency_key"}
+                   "document_version_id", "idempotency_key", "library_selection", "library_scope", "source_ranges",
+                   "purpose", "analysis_entry_id", "analysis_version_id", "method_run_id"}
         if set(request) - allowed:
             raise VibeNovelError("任务请求包含不支持的字段")
         request = copy.deepcopy(request)
@@ -502,10 +521,18 @@ class JobManager:
         except UnicodeError as exc:
             raise VibeNovelError("任务说明包含无效 Unicode") from exc
         request["instruction"] = instruction
+        if request["kind"] in METHOD_KINDS:
+            from .method_jobs import prepare
+            return prepare(self, project, request)
+        if set(request) & {"library_scope", "source_ranges", "purpose", "analysis_entry_id", "analysis_version_id", "method_run_id"}:
+            raise VibeNovelError("资料来源与方法流程字段只供资料分析或提炼任务使用")
         if request["kind"] == "generate_story_outline":
             return self._prepare_creation(project, request)
-        if "idempotency_key" in request or "document_version_id" in request:
-            raise VibeNovelError("幂等键和简报版本仅供初版总纲任务使用")
+        if "document_version_id" in request:
+            raise VibeNovelError("简报版本仅供初版总纲任务使用")
+        if "idempotency_key" in request and (not isinstance(request["idempotency_key"], str)
+                or not _IDEMPOTENCY.fullmatch(request["idempotency_key"])):
+            raise VibeNovelError("任务幂等键需要16–80位字母、数字、下划线或短横线")
         blueprint = request["kind"] == "build_blueprint"
         artifact = request["kind"] in ("review_evidence", "memory_delta")
         if blueprint:
@@ -709,7 +736,7 @@ class JobManager:
         from vibenovel.core.creation import (CREATIVE_BRIEF_PATH, CreativeBriefStore, catalog,
                                              effective_brief, render_brief, validate_for_generation)
         if set(request) - {"kind", "provider", "instruction", "document_path", "document_hash",
-                           "document_version_id", "idempotency_key"}:
+                           "document_version_id", "idempotency_key", "library_selection"}:
             raise VibeNovelError("初版总纲任务不接受章计划、选区或批量规划参数")
         if request.get("document_path", CREATIVE_BRIEF_PATH) != CREATIVE_BRIEF_PATH:
             raise VibeNovelError("初版总纲只使用当前作品固定创作简报")
@@ -838,11 +865,17 @@ class JobManager:
     def preview(self, project, request):
         from .routing import ProjectRouting
         project = self._project(project)
+        if isinstance(request, dict) and request.get("kind") in METHOD_KINDS:
+            self._ensure_started()
         prepared = self._prepare(project, request)
         route = ProjectRouting(project, self.workspace).preview(prepared[0]["kind"], prepared[1],
                     {"allow_unconfigured": self._factory is not None})
         if prepared[0]["kind"] == "generate_story_outline":
             route["creation_preview"] = prepared[5]
+        if prepared[0]["kind"] in METHOD_KINDS:
+            route["method_preview"] = prepared[5]["method_context"]
+        elif prepared[5] and "library_context" in prepared[5]:
+            route["library_preview"] = prepared[5]["library_context"]
         return route
 
     def creation_preview(self, project, request):
@@ -875,10 +908,39 @@ class JobManager:
             raise ConflictError("任务模型或预算策略在提交期间变化，未发送请求；请重新预览")
 
     def submit(self, project, request, *, workflow_id=None, workflow_node=None, budget_group=None,
-               expected_configuration=None):
+               expected_configuration=None, expected_library_hash=None):
         project = self._project(project)
         self._ensure_started()
         with self._lock:
+            if isinstance(request, dict) and "idempotency_key" in request:
+                key = request["idempotency_key"]
+                if not isinstance(key, str) or not _IDEMPOTENCY.fullmatch(key):
+                    raise VibeNovelError("任务幂等键需要16–80位有效字符")
+                normalized = self._idempotent_request(request)
+                for (novel_id, _), old in self._jobs.items():
+                    if novel_id == project.novel_id and old["request"].get("idempotency_key") == key:
+                        if (self._idempotent_request(old["request"]) != normalized
+                                or old.get("expected_configuration") != expected_configuration
+                                or old.get("expected_library_hash") != expected_library_hash
+                                or old.get("workflow_id") != workflow_id or old.get("workflow_node") != workflow_node):
+                            raise ConflictError("任务幂等键已绑定另一份请求或预览；请使用新键")
+                        return self._public(old)
+            if isinstance(request, dict) and request.get("kind") in METHOD_KINDS:
+                if workflow_id is not None or budget_group is not None:
+                    raise VibeNovelError("资料分析与方法提炼使用独立显式流程，不接受写作流程或任意预算组")
+                key = request.get("idempotency_key")
+                if not isinstance(key, str) or not _IDEMPOTENCY.fullmatch(key):
+                    raise VibeNovelError("方法任务需要16–80位有效幂等键")
+                normalized = copy.deepcopy(request)
+                normalized.setdefault("provider", "api")
+                normalized.setdefault("instruction", "")
+                normalized.setdefault("library_scope", "book")
+                for (novel_id, _), old in self._jobs.items():
+                    if novel_id == project.novel_id and old["kind"] in METHOD_KINDS and old["request"].get("idempotency_key") == key:
+                        if (old["request"] != normalized or old.get("expected_configuration") != expected_configuration
+                                or old.get("expected_library_hash") != expected_library_hash):
+                            raise ConflictError("方法幂等键已绑定另一份请求；请重新预览并使用新键")
+                        return self._public(old)
             if isinstance(request, dict) and request.get("kind") == "generate_story_outline":
                 if workflow_id is not None or budget_group is not None:
                     raise VibeNovelError("初版总纲是独立规划节点，不能加入候选写作流程或重用旧预算组")
@@ -894,18 +956,29 @@ class JobManager:
                     if (novel_id == project.novel_id and old["kind"] == "generate_story_outline"
                             and old["request"].get("idempotency_key") == key):
                         if (old["request"] != normalized
-                                or old.get("expected_configuration") != expected_configuration):
+                                or old.get("expected_configuration") != expected_configuration
+                                or old.get("expected_library_hash") != expected_library_hash):
                             raise ConflictError("此幂等键已绑定另一份总纲请求；请重新预览并使用新键")
                         return self._public(old)
             if sum(job["state"] not in TERMINAL for job in self._jobs.values()) >= self._max_pending:
                 raise VibeNovelError("任务队列已满，请完成或取消已有任务")
             request, prompt, sources, fingerprint, canonical_revision, brief_snapshot = self._prepare(project, request)
+            library_context = None if not brief_snapshot else brief_snapshot.get("method_context", brief_snapshot.get("library_context"))
+            if library_context and library_context.get("snapshot"):
+                if library_context["snapshot"]["hash"] != expected_library_hash:
+                    raise ConflictError("任务资料与方法预览已变化或未确认，请重新预览")
             now = utc_now()
             job_id = uuid.uuid4().hex
             from .routing import ProjectRouting
+            if request["kind"] in METHOD_KINDS:
+                budget_group = brief_snapshot["method_context"].get("budget_group") or job_id
             route = ProjectRouting(project, self.workspace).preview(request["kind"], prompt,
                       {"allow_unconfigured": self._factory is not None, "group_id": budget_group or job_id})
-            if workflow_id is not None or request["kind"] == "generate_story_outline":
+            if request["kind"] == "extract_methods":
+                prior = self._get(project, request["method_run_id"])
+                if route["budget"] != prior["route"]["budget"]:
+                    raise ConflictError("方法流程预算已变化；请保留原记录并新建明确流程")
+            if expected_configuration is not None or workflow_id is not None or request["kind"] == "generate_story_outline" or request["kind"] in METHOD_KINDS:
                 self._check_workflow_route(route, expected_configuration)
             versions = {path: (_storage_call(lambda path=path: _documents(project).history(path)) or [{"id": None}])[0]["id"]
                         for path in sources}
@@ -924,14 +997,21 @@ class JobManager:
                    "context_sources": sources, "source_versions": versions, "_prompt": prompt,
                    "route": route, "attempts": [], "budget_summary": None,
                    "workflow_id": workflow_id, "workflow_node": workflow_node}
-            if workflow_id is not None or request["kind"] == "generate_story_outline":
+            if library_context and library_context.get("snapshot"):
+                job["expected_library_hash"] = expected_library_hash
+            if expected_configuration is not None or workflow_id is not None or request["kind"] == "generate_story_outline" or request["kind"] in METHOD_KINDS:
                 job["expected_configuration"] = copy.deepcopy(expected_configuration)
             if brief_snapshot is not None:
+                if "library_context" in brief_snapshot:
+                    job["library_context"] = brief_snapshot.pop("library_context")
+                if "method_context" in brief_snapshot:
+                    job["library_context"] = brief_snapshot.pop("method_context")
                 name = ("creative_brief" if request["kind"] == "generate_story_outline" else
                         "creation_origin" if "creation_origin" in brief_snapshot else
                         "editorial_context" if (request["kind"] in ("review", "rewrite")
                             and ("editorial" in request or "selection" in request)) else "chapter_brief")
-                job[name] = brief_snapshot.get("creation_origin", brief_snapshot)
+                if brief_snapshot:
+                    job[name] = brief_snapshot.get("creation_origin", brief_snapshot)
             self._log(job, "任务已排队；输出仅保存为候选。")
             self._persist(project, job)
             key = (project.novel_id, job_id)
@@ -939,9 +1019,35 @@ class JobManager:
             self._queue.put(key)
             return self._public(job)
 
+    @staticmethod
+    def _idempotent_request(request):
+        value = copy.deepcopy(request)
+        value.setdefault("provider", "api")
+        value.setdefault("instruction", "")
+        if value.get("kind") == "generate_story_outline":
+            from vibenovel.core.creation import CREATIVE_BRIEF_PATH
+            value.setdefault("document_path", CREATIVE_BRIEF_PATH)
+        if value.get("kind") in METHOD_KINDS:
+            value.setdefault("library_scope", "book")
+        if value.get("kind") == "draft":
+            value.setdefault("brief_mode", "compact")
+        if value.get("kind") == "build_blueprint":
+            value.setdefault("planning_start", 1)
+            value.setdefault("planning_count", 3)
+        if value.get("kind") in ("review", "rewrite") and ("selection" in value or "editorial" in value):
+            value.setdefault("editorial", {"goals": ["preserve_voice"], "intensity": "standard"})
+        return value
+
     def _validate_snapshot(self, project, job):
         if job["provider"] != "api":
             raise VibeNovelError("Codex 交互协作已停用；旧记录仅供查看，请新建 API 任务")
+        if "library_context" in job:
+            from .method_jobs import validate
+            validate(self.workspace, project, job["library_context"])
+        if job["kind"] in METHOD_KINDS:
+            if "library_context" not in job:
+                raise VibeNovelError("资料方法任务缺少冻结的有类型来源依赖")
+            return  # Library analysis never reads or depends on novel canon.
         if job["kind"] == "build_blueprint":
             _validate_blueprint_source(job["request"].get("document_path"))
         if project.fingerprint() != job["fingerprint"]:
@@ -1031,7 +1137,7 @@ class JobManager:
             except Exception as exc:
                 with self._lock:
                     if job["state"] == "running" and self._active(project, job, event, token):
-                        recoverable = bool(job.get("_pending_result")) and not isinstance(exc, ConflictError)
+                        recoverable = bool(job.get("_pending_result") or job.get("_pending_library_result")) and not isinstance(exc, ConflictError)
                         job["state"] = "interrupted" if recoverable else "failed"
                         job.pop("_run_token", None)
                         job["error"] = ("候选发布未完成；已保留恢复文本，不会自动再次调用模型。"
@@ -1062,7 +1168,7 @@ class JobManager:
         group = route["group_id"]
         for candidate in route["candidates"][:route["max_attempts"]]:
             self._validate_snapshot(project, job)
-            if job.get("workflow_id") is not None or job["kind"] == "generate_story_outline":
+            if job.get("expected_configuration") is not None or job.get("workflow_id") is not None or job["kind"] == "generate_story_outline" or job["kind"] in METHOD_KINDS:
                 expected = job.get("expected_configuration")
                 self._check_workflow_route(route, expected)
                 # A queued workflow node must still belong to the same policy.
@@ -1169,6 +1275,9 @@ class JobManager:
                      if name in ("prompt_tokens", "completion_tokens", "total_tokens")
                      and type(count) is int and count >= 0} or None
         job["usage"] = usage
+        if job["kind"] in METHOD_KINDS:
+            self._publish_library(project, job, result.text, usage, prepared=prepared)
+            return
         if job["kind"] in ("review_evidence", "memory_delta"):
             from vibenovel.core.model_artifacts import prepare_artifact, validate_artifact
             prepare = validate_artifact if prepared else prepare_artifact
@@ -1219,6 +1328,73 @@ class JobManager:
             raise
         job.pop("_run_token", None)
         job.pop("_pending_result", None)
+
+    def _pending_library(self, job):
+        pending = job.get("_pending_library_result")
+        if (job["kind"] not in METHOD_KINDS or not isinstance(pending, dict)
+                or set(pending) != {"bundle", "hash", "usage"}
+                or not isinstance(pending["bundle"], dict)
+                or digest(json_bytes(pending["bundle"])) != pending["hash"]):
+            raise VibeNovelError("方法候选包发布意图无效，未恢复")
+        return pending
+
+    def _complete_library(self, project, job, published):
+        job.update(result_library=published, result_hash=job["_pending_library_result"]["hash"],
+                   state="succeeded", error=None)
+        job.pop("repair_candidate", None)
+        self._log(job, "资料候选包完整入库；尚未采用、试用或更改小说正式资料。")
+        try:
+            self._persist(project, job)
+        except (OSError, VibeNovelError):
+            job["state"] = "interrupted"
+            job["error"] = "方法候选包已发布，任务完成记录未落盘；重启仅对账，不会再次调用模型。"
+            raise
+        job.pop("_run_token", None)
+        job.pop("_pending_library_result", None)
+
+    def _recover_library_pending(self, project, job):
+        from .method_jobs import store
+        pending = self._pending_library(job)
+        try:
+            self._validate_snapshot(project, job)
+            published = store(self.workspace, project).method_bundle(job["id"])
+            if published is not None:
+                if (published.get("request_hash") != pending["hash"]
+                        or published.get("snapshot_hash") != job["library_context"]["snapshot"]["hash"]
+                        or published.get("expected_analysis") != job["library_context"].get("analysis")):
+                    raise ConflictError("已发布方法包与持久发布意图不同")
+                self._complete_library(project, job, published)
+                return
+            job.update(state="interrupted", error="方法模型已返回，候选包尚未发布；请明确恢复，不会再次调用。")
+        except VibeNovelError:
+            job.update(state="interrupted", error="方法资料、分析或选择版本已失效；保留候选包，未发布或重调模型。")
+        job.pop("_run_token", None)
+        self._persist(project, job)
+
+    def _publish_library(self, project, job, text, usage, *, prepared=False):
+        from .method_jobs import canonical_bundle, store
+        self._validate_snapshot(project, job)
+        if prepared:
+            pending = self._pending_library(job)
+            bundle = pending["bundle"]
+        else:
+            try:
+                bundle = canonical_bundle(job, text)
+            except VibeNovelError as exc:
+                job.update(state="awaiting_input", repair_candidate=text,
+                           error="资料分析或方法卡校验未通过，可手工修正JSON：" + str(exc))
+                job.pop("_run_token", None)
+                self._log(job, "资料候选未发布，等待人工修正；不会自动再次调用模型。")
+                self._persist(project, job)
+                return
+            job["_pending_library_result"] = {"bundle": bundle, "hash": digest(json_bytes(bundle)), "usage": usage}
+            self._log(job, "资料候选已校验，先保存完整发布意图，再原子发布候选包。")
+            self._persist(project, job)
+        published = _storage_call(lambda: store(self.workspace, project).publish_method_bundle(
+            bundle, task_snapshot=job["library_context"]["snapshot"], job_id=job["id"],
+            expected_analysis=job["library_context"].get("analysis")))
+        self._validate_snapshot(project, job)
+        self._complete_library(project, job, published)
 
     @staticmethod
     def _prepare_blueprint(project, job, text):
@@ -1286,7 +1462,7 @@ class JobManager:
         self._ensure_started()
         with self._lock:
             old = self._get(project, job_id)
-            if old["kind"] == "generate_story_outline":
+            if old["kind"] == "generate_story_outline" or old["kind"] in METHOD_KINDS:
                 raise VibeNovelError("初版总纲不会沿旧幂等键重试；请返回创意页重新预览并明确生成，新请求使用新键")
             if old.get("workflow_id"):
                 raise VibeNovelError("工作流节点不能从通用任务页重复调用；请核对原流程与不确定费用后明确新建流程")
@@ -1297,7 +1473,12 @@ class JobManager:
             if old.get("_pending_result"):
                 raise VibeNovelError("模型已返回候选，请恢复结果；重试不会用于覆盖已有候选")
             self._validate_snapshot(project, old)
-            new = self.submit(project, old["request"], budget_group=old.get("route", {}).get("group_id"))
+            retried = copy.deepcopy(old["request"])
+            if "idempotency_key" in retried:
+                retried["idempotency_key"] = uuid.uuid4().hex
+            new = self.submit(project, retried, budget_group=old.get("route", {}).get("group_id"),
+                              expected_configuration=old.get("expected_configuration"),
+                              expected_library_hash=old.get("expected_library_hash"))
             job = self._get(project, new["id"])
             job["retry_of"] = old["id"]
             self._log(job, "作者明确重试，创建关联的新任务。")
@@ -1309,9 +1490,11 @@ class JobManager:
         self._ensure_started()
         with self._lock:
             job = self._get(project, job_id)
-            repair = job["kind"] == "build_blueprint" and "repair_candidate" in job
+            repair = job["kind"] in ("build_blueprint",) + METHOD_KINDS and "repair_candidate" in job
             if job["provider"] != "api" or job["state"] != "awaiting_input" or not repair:
                 raise VibeNovelError("仅允许手工修复 API 任务返回的无效创作规划 JSON")
+            if job.get("_pending_library_result"):
+                raise VibeNovelError("已有等待恢复的方法候选包，请恢复结果")
             if job.get("_pending_result"):
                 self._recover_pending(project, job)
                 if job["state"] == "succeeded":
@@ -1320,7 +1503,7 @@ class JobManager:
             try:
                 self._publish(project, job, GenerationResult(text, job.get("usage") if repair else None))
             except (OSError, VibeNovelError):
-                if job.get("_pending_result"):
+                if job.get("_pending_result") or job.get("_pending_library_result"):
                     job["state"] = "interrupted"
                     job["error"] = "候选发布未完成；已保留恢复文本，请恢复结果。"
                     try:
@@ -1336,6 +1519,12 @@ class JobManager:
         self._ensure_started()
         with self._lock:
             job = self._get(project, job_id)
+            if job.get("_pending_library_result"):
+                if job["state"] != "interrupted":
+                    raise VibeNovelError("此方法任务没有等待恢复的候选包")
+                self._validate_snapshot(project, job)
+                self._publish_library(project, job, None, job.get("usage"), prepared=True)
+                return self._public(job)
             if job["provider"] != "api":
                 raise VibeNovelError("Codex 交互协作已停用；旧记录仅供查看，请新建 API 任务")
             if job["state"] != "interrupted" or not job.get("_pending_result"):

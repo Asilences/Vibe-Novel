@@ -114,3 +114,27 @@ metadata 保存作品 ID、首次导入文件名、字节 hash、抽取 hash、�
 从生成纲展开`build_blueprint`须有仍有效且匹配当前总纲的显式选用。规划任务冻结总纲、简报、选用记录的hash/history，发送、迟到结果发布、崩溃恢复均复核；规划包保留这组来源，作者编辑JSON也不能删除原生成任务依赖而继续审批。创建规划提案时在写锁内再次核对历史，防止读取与提案保存之间A→B→A。已应用规划通过既有提案的依赖版本继续核对，不依赖候选文件名。
 
 修改简报或改选后，旧规划的批准历史保留，相关规划可显示来源过期并阻止继续提取新章计划；不自动撤销批准记录，也不改已定稿正文或正式记忆。人物/世界、时间线/伏笔、文风导航只是同一规划包的投影，尚无独立按条资料编辑。当前不实现多文件共同定稿事务。
+
+## 私人资料库与方法任务补充（3.0.0a9）
+
+工作区 `library/` 是个人库；`novels/<novel_id>/library/` 是本书私有库，均默认Git忽略。新库不迁移根v2 references、不改既有import bundle布局、不写bible/chapters/memory。库不是可删除的缓存：备份须包含完整库目录；本书个人绑定依赖工作区个人库，目前不自动把它打包进单书导出。
+
+schema1清单为 `.state/manifest.json`，含固定scope/owner、library_id、单调revision及source/entry/binding/collection/question/policy/bundle七类不可变版本索引。记录位于 `records/<kind>/<id>/<version_id>.json`，ID/版本为32位小写hex，hash为记录字节SHA256。每记录最多16MiB，清单8MiB/一万历史版本。准备不可变记录后，通过 `.state/journal.json` 最后发布一个库的清单；恢复仅完成本地发布，不再调用模型。没有跨库或小说正式内容的共同事务；符号链接/越界路径拒绝。
+
+来源支持MD/TXT，原件与UTF-8抽取各不超过10MiB，显式编码及保真解码；原字节和UTF-8文本分别位于 `blobs/<sha256>`，同字节可复用blob而不丢不同书目记录。每来源版本固定原件hash、文本hash、解析器版本、书目信息、外发与撤回状态。引用固定scope/owner、source_id/source_version_id、Unicode码点半开区间和逐字quote，服务器计算行号；浏览器UTF-16与换行差异经原文映射，不用重复原句搜索猜位置。
+
+entry有六类：literature/material/technique/style/term/method，收件状态inbox/ready/archived，核对状态unverified/checked/disputed/needs_evidence，作者/模型来源性质独立。研究问题可以保留冲突与未解决状态；“已核对”或“已采用”不会使内容成为故事事实。方法含purpose、steps、inputs、outputs、limitations、applies_to、counterexamples、checks。模型不能指定已有ID、作者身份、外发授权或采用；候选默认local/inbox/unverified。独立adopt接口记录作者采用；修改后需要重新采用，历史仍可回顾。
+
+本书binding只显式固定个人entry版本与用途，读新版不静默换绑，不能引用另一作品私有库。库卡和来源的local/summary/excerpts分别表示仅本地、仅作者摘要、允许所选内容；source直接区间须excerpts。来源/条目保存的authorization_revision只在外发/撤回改变时推进；来源普通标题/笔记新版不废固定来源旧版本，个人binding仍固定所选entry版；本书entry直接任务依赖要求当前精确版本，编辑标题也会使其旧任务失效。收紧再恢复也不能复活旧任务/绑定。来源撤回与绑定收紧在选材、发送、迟到结果和恢复时再核对；跨库不存在分布式原子提交保证。
+
+本书policy默认manual，另可recommend/auto，含类型、用途、专题、必选/排除ID、条目数与字符预算。recommend仅返回建议；auto只在授权用途内召回本书卡与已选个人绑定，不扫描别书或自动发整本来源。中文二元词项/精确匹配检索有400记录/8MiB上限并返回遗漏；这是有界本地检索，不是新增向量索引。自动选材上限为60000字符，普通写作装配另限24000且服从更小书级上限；可选项超限省略并记录，必选超限拒绝，零命中返回空资料但固定policy。整任务提示仍受220000字符上限。
+
+任务资料snapshot schema1保存scope/owner/library_id、实际text、输入/遗漏manifest、真正实发的source_fragments、typed_deps、policy身份及hash。未发送的卡片出处不能冒充实发原句，仍保留有类型依赖和说明。预览不付费；有资料snapshot的提交必须携expected_library_hash，配置身份与资料hash不进入业务request而由submit专门校验。无库旧作品路径兼容；手动/推荐模式没有实际资料snapshot时不强加库hash。普通任务显式重试沿用原键/预算，不重启重放不明的付费请求。
+
+`analyze_reference`与`extract_methods`为planner API任务，必须显式选择真实计费作品、资料scope、精确版本范围、用途及16–80位幂等键。个人来源也只读所选资料，不读取计费书正文。分析生成阅读地图/观察/方向/普通参考/缺口的technique卡；提炼必须绑定有效分析entry/version和原analyze job，以同范围、用途、计费书及预算组继续，可返回零方法，不凑数。模型JSON严格字段/有界文本；每条引用必须逐字匹配实际发送区间，原书案例与合成练习分开。
+
+结果在job.result_library记录，不伪造文稿result_path。完整候选包先持久化待发布内容，再由库清单整包发布，按job ID、request_hash、snapshot_hash及expected_analysis幂等对账。提炼的分析身份在同库写锁内核对精确当前版本及非归档/撤回；journal恢复同验。失效待发布包保留rejected意图和候选对象，不暴露半套方法；已发布包完成记录失败时可对账，不重复生成或覆盖作者后来编辑。无来源、缺引用/结构错误保留待修，不自动重调。
+
+总纲、纲要扩写、卷章规划、批准章计划起草、审稿和改写均可按本书策略补充资料；多模型工作流冻结初始库依赖，后继不能静默换资料。候选记忆仅抽冻结正文，不注入参考库事实。方法采用、词项分数、程序引用检查都不授予章计划批准、正式写入或文学效果结论。
+
+普通文稿候选在发送与发布前核对资料依赖，但库与DocumentStore采用不同锁域，不构成跨存储原子事务。已发布文稿的库快照留在任务记录；后继工作流会重新校验，单文件提案/人工打开候选尚未统一接入库依赖检查。撤回资料不会自动删除或撤销已经发布的候选，不能据此宣称所有旧候选仍可作为当前有效资料继续使用。

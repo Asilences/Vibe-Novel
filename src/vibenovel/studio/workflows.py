@@ -104,6 +104,9 @@ class WorkflowManager:
                 or registry.get("legacy_marker") != flow.get("registry_legacy_marker")
                 or policy["revision"] != flow["policy_revision"] or policy["hash"] != flow["policy_hash"]):
             raise VibeNovelError("工作流模型或预算策略版本已变化，请重新预览后创建工作流")
+        if flow.get("library_context"):
+            from .method_jobs import validate
+            validate(self.jobs.workspace, project, flow["library_context"])
 
     def _check(self, project, flow):
         self._check_configuration(project, flow)
@@ -122,7 +125,22 @@ class WorkflowManager:
 
     def _dispatch(self, project, flow, request):
         self._check(project, flow)
+        request = copy.deepcopy(request)
+        if flow.get("library_selection") and request["kind"] != "memory_delta":
+            request["library_selection"] = copy.deepcopy(flow["library_selection"])
         route = self.jobs.preview(project, request)
+        library = route.get("library_preview")
+        snapshot = library.get("snapshot") if library else None
+        frozen = ((flow.get("library_context") or {}).get("snapshot")
+                  if request["kind"] != "memory_delta" else None)
+        if bool(snapshot) != bool(frozen):
+            raise VibeNovelError("工作流资料装配范围变化；请重新预览并创建工作流")
+        if snapshot:
+            def identities(value):
+                return sorted((item["kind"], item["id"], item["version_id"], item["hash"])
+                              for item in value["manifest"] if item.get("included", True) and "id" in item)
+            if identities(snapshot) != identities(frozen) or snapshot["source_fragments"] != frozen["source_fragments"]:
+                raise VibeNovelError("后继资料与已预览范围不同；未发送请求，请创建新工作流预览")
         if request["kind"] == "review_evidence" and flow["independent_review"]:
             writer = next(node for node in reversed(flow["nodes"]) if node["kind"] in ("draft", "rewrite"))
             written = self.jobs.get(project, writer["job_id"]).get("selected_model")
@@ -142,7 +160,8 @@ class WorkflowManager:
             expected = {name: flow[name] for name in ("policy_revision", "policy_hash", "registry_revision",
                                                       "registry_hash", "registry_legacy_marker")}
             job = self.jobs.submit(project, request, workflow_id=flow["id"], workflow_node=flow["dispatching"],
-                                   budget_group=flow["id"], expected_configuration=expected)
+                                   budget_group=flow["id"], expected_configuration=expected,
+                                   expected_library_hash=snapshot["hash"] if snapshot else None)
         except Exception:
             # Keep durable dispatch intent for reconciliation, never repeat it.
             raise
@@ -153,13 +172,22 @@ class WorkflowManager:
         return copy.deepcopy(flow)
 
     def create(self, project, request, review=True, memory=True, independent_review=False):
+        request = copy.deepcopy(request)
+        expected_library_hash = request.pop("expected_library_hash", None)
+        expected_configuration = request.pop("expected_configuration", None)
         if any(type(value) is not bool for value in (review, memory, independent_review)):
             raise VibeNovelError("工作流审稿、抽取和独立审稿开关需要布尔值")
         if independent_review and not review:
             raise VibeNovelError("独立审稿要求启用审稿节点")
         if request.get("kind") not in ("draft", "rewrite"):
             raise VibeNovelError("候选工作流从批准计划起草或既有稿修订开始")
-        self.jobs.preview(project, request)
+        initial_preview = self.jobs.preview(project, request)
+        if expected_configuration is not None:
+            self.jobs._check_workflow_route(initial_preview, expected_configuration)
+        library_context = initial_preview.get("library_preview")
+        library_snapshot = (library_context or {}).get("snapshot")
+        if library_snapshot and library_snapshot["hash"] != expected_library_hash:
+            raise VibeNovelError("工作流资料尚未按当前版本预览，请重新预览")
         registry = ModelRegistry(self.jobs.workspace).public()
         policy = ProjectRouting(project, self.jobs.workspace).public()
         steps = [request["kind"]] + (["review_evidence"] if review else []) + (["memory_delta"] if memory else [])
@@ -171,6 +199,9 @@ class WorkflowManager:
                 "registry_legacy_marker": registry.get("legacy_marker"),
                 "policy_revision": policy["revision"], "policy_hash": policy["hash"],
                 "independent_review": independent_review, "revision_rounds": 0, "budget_summary": None, "error": None}
+        if library_snapshot:
+            flow["library_context"] = library_context
+            flow["library_selection"] = request.get("library_selection")
         with self._lock:
             self._save(project, flow)
             return self._dispatch(project, flow, request)
