@@ -7,10 +7,11 @@ import re
 from typing import Optional
 
 from vibenovel.errors import MissingDocumentError, VibeNovelError
-from .approvals import ApprovalStore, _check_proposal_dependencies, _latest_applied_id
+from .approvals import (ApprovalStore, _check_proposal_dependencies, _dependency_versions,
+                        _latest_applied_id)
 from .documents import (HASH, MAX_DOCUMENT_BYTES, ConflictError, DocumentStore, _Storage,
                         _check_expected, _content_bytes, _decode, _kind, _read_raw)
-from .files import digest, file_digest, json_bytes, tree_files
+from .files import digest, file_digest, json_bytes, read_json, tree_files
 from .project import Project
 
 APPROVED_BLUEPRINT = "outlines/approved/blueprint.json"
@@ -276,6 +277,47 @@ class PlanningStore:
         self.project = project
         self.storage = _Storage(project)
 
+    def _creation_origin(self, path, data, state):
+        """Keep generated first-outline planning bound to its durable input versions.
+
+        Older ordinary planning packages remain hash-compatible. New creation
+        packages also carry the brief/selection in source_hashes; their original
+        job is a backend-owned provenance record, not model-supplied JSON.
+        """
+        from .creation import CREATIVE_BRIEF_PATH, CREATION_SELECTION_PATH
+        if path == APPROVED_BLUEPRINT:
+            # Applied packages use the existing recorded approval dependency
+            # versions, checked below; they need not retain the candidate path.
+            return
+        match = re.fullmatch(r"outlines/proposals/blueprint-([0-9a-f]{32})\.json", path)
+        has_creation_sources = bool({CREATIVE_BRIEF_PATH, CREATION_SELECTION_PATH} & set(data["source_hashes"]))
+        job = None
+        if match:
+            runtime_path = self.project.path(".runtime/jobs/" + match[1] + ".json")
+            if runtime_path.exists():
+                try:
+                    job = read_json(runtime_path, max_bytes=8 * 1024 * 1024)
+                except (OSError, VibeNovelError) as exc:
+                    raise _StaleBlueprint("规划包原任务无法验证，已阻止重新审批") from exc
+        if not has_creation_sources and not (job and job.get("creation_origin")):
+            return
+        if (not job or job.get("schema_version") != 1 or job.get("novel_id") != self.project.novel_id
+                or not match or job.get("id") != match[1] or job.get("kind") != "build_blueprint"
+                or job.get("state") != "succeeded" or job.get("result_path") != path
+                or not isinstance(job.get("creation_origin"), dict)
+                or job.get("context_sources") != data["source_hashes"]):
+            raise _StaleBlueprint("创作规划包缺少匹配的原任务及简报选用来源，不能复活旧规划")
+        versions = job.get("source_versions")
+        if not isinstance(versions, dict) or set(versions) != set(data["source_hashes"]):
+            raise _StaleBlueprint("创作规划包缺少完整的冻结来源历史")
+        for source, expected in versions.items():
+            history = state["history"].get(source, [])
+            current = history[-1]["id"] if history else None
+            if expected is not None and (not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{32}", expected)):
+                raise _StaleBlueprint("创作规划包的冻结来源历史身份无效")
+            if current != expected:
+                raise _StaleBlueprint("创作规划包来源存在更新的历史版本，请重新选用并展开规划: " + source)
+
     def _read(self, path: str, state: dict) -> dict:
         _planning_path(self.project, path)
         result = {"path": path, "hash": None, "content": "", "data": None, "valid": False,
@@ -288,6 +330,7 @@ class PlanningStore:
             result["content"] = _decode(raw)
             result["data"] = _parse(result["content"])
             _validate(self.project, result["data"])
+            self._creation_origin(path, result["data"], state)
             result["valid"] = True
         except MissingDocumentError:
             raise
@@ -330,32 +373,35 @@ class PlanningStore:
                      if key not in ("content", "data")} for path in sorted(paths)]
 
     def propose(self, path: str, expected_hash: str, chapter_id: Optional[str] = None) -> dict:
-        package = self.read(path)
-        _check_expected(package["content"].encode("utf-8"), expected_hash)
-        if not package["valid"] or package["stale"]:
-            raise ConflictError("规划包无效或来源已变化，请先修复规划包")
-        data = package["data"]
-        dependencies = copy.deepcopy(data["source_hashes"])
-        if chapter_id is None:
-            target, content = APPROVED_BLUEPRINT, package["content"]
-            reason, impact = "提交创作规划包供作者审阅", ["仅更新未来创作计划，不确认情节发生，不更新正式正文或记忆"]
-        else:
-            if not isinstance(chapter_id, str) or not ID.fullmatch(chapter_id):
-                raise VibeNovelError("章计划 ID 无效")
-            if path != APPROVED_BLUEPRINT or not package["approved"]:
-                raise ConflictError("只有有效且已应用审批的父规划包可以提取章计划")
-            chapter = next((item for item in data["chapters"] if item["id"] == chapter_id), None)
-            if chapter is None:
-                raise VibeNovelError("规划包中未找到此章 ID")
-            target = f"outlines/approved/ch{chapter['number']:03d}.md"
-            content = _chapter_markdown(data, chapter)
-            dependencies[path] = package["hash"]
-            reason, impact = f"从已批准规划包提取第 {chapter['number']} 章计划", ["本章草稿须待本提案批准并应用后生成", "父规划包或来源变化会使章计划失效"]
-        if target in dependencies:
-            raise VibeNovelError("规划提案的目标不能同时作为来源；请从导入原件、来源大纲或候选重新规划")
-        before = _read_raw(self.project, target)
-        # create takes its own lock; dependency and target hashes close the gap
-        # after read without recursively acquiring the non-reentrant lock.
+        with self.storage.locked() as state:
+            package = self._read(path, state)
+            _check_expected(package["content"].encode("utf-8"), expected_hash)
+            if not package["valid"] or package["stale"]:
+                raise ConflictError("规划包无效或来源已变化，请先修复规划包")
+            data = package["data"]
+            dependencies = copy.deepcopy(data["source_hashes"])
+            if chapter_id is None:
+                target, content = APPROVED_BLUEPRINT, package["content"]
+                reason, impact = "提交创作规划包供作者审阅", ["仅更新未来创作计划，不确认情节发生，不更新正式正文或记忆"]
+            else:
+                if not isinstance(chapter_id, str) or not ID.fullmatch(chapter_id):
+                    raise VibeNovelError("章计划 ID 无效")
+                if path != APPROVED_BLUEPRINT or not package["approved"]:
+                    raise ConflictError("只有有效且已应用审批的父规划包可以提取章计划")
+                chapter = next((item for item in data["chapters"] if item["id"] == chapter_id), None)
+                if chapter is None:
+                    raise VibeNovelError("规划包中未找到此章 ID")
+                target = f"outlines/approved/ch{chapter['number']:03d}.md"
+                content = _chapter_markdown(data, chapter)
+                dependencies[path] = package["hash"]
+                reason, impact = f"从已批准规划包提取第 {chapter['number']} 章计划", ["本章草稿须待本提案批准并应用后生成", "父规划包或来源变化会使章计划失效"]
+            if target in dependencies:
+                raise VibeNovelError("规划提案的目标不能同时作为来源；请从导入原件、来源大纲或候选重新规划")
+            before = _read_raw(self.project, target)
+            dependency_versions = _dependency_versions(state, dependencies)
+        # The separate create lock rechecks both hashes and observed versions;
+        # an A -> B -> A between these locks cannot revive the read snapshot.
         return ApprovalStore(self.project).create(target, content, reason, impact,
                                                   digest(before) if before is not None else None,
-                                                  dependencies=dependencies)
+                                                  dependencies=dependencies,
+                                                  expected_dependency_versions=dependency_versions)

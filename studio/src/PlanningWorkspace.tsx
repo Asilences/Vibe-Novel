@@ -55,6 +55,11 @@ type Props = {
   onTasks: (id?: string) => void;
   onSource: (path: string, line?: number) => void;
   initialPath?: string;
+  initialSourcePath?: string;
+  initialTab?: Tab;
+  onDirtyChange?: (dirty: boolean) => void;
+  onImport?: () => void;
+  onPaste?: () => void;
 };
 type Tab =
   | "overview"
@@ -337,15 +342,20 @@ export default function PlanningWorkspace({
   onTasks,
   onSource,
   initialPath,
+  initialSourcePath,
+  initialTab,
+  onDirtyChange,
+  onImport,
+  onPaste,
 }: Props) {
-  const [sourcePath, setSourcePath] = useState("");
+  const [sourcePath, setSourcePath] = useState(initialSourcePath || "");
   const [start, setStart] = useState(1);
   const [count, setCount] = useState(3);
   const [instruction, setInstruction] = useState("");
   const [packages, setPackages] = useState<PlanningPackageSummary[]>([]);
   const [selectedPath, setSelectedPath] = useState(initialPath || "");
   const [selected, setSelected] = useState<PlanningPackage | null>(null);
-  const [tab, setTab] = useState<Tab>("overview");
+  const [tab, setTab] = useState<Tab>(initialTab || "overview");
   const [loading, setLoading] = useState(false);
   const [loadingPackage, setLoadingPackage] = useState(false);
   const [busy, setBusy] = useState("");
@@ -404,6 +414,13 @@ export default function PlanningWorkspace({
           item.id === lastExtraction.current &&
           ["applied", "rejected"].includes(item.state),
       ));
+
+  useEffect(() => { if (initialTab) setTab(initialTab); }, [initialTab]);
+  useEffect(() => { if (initialSourcePath) setSourcePath(initialSourcePath); }, [initialSourcePath]);
+  const onDirtyRef = useRef(onDirtyChange); onDirtyRef.current = onDirtyChange;
+  const formDirty = (!!editing && editText !== editing.content) || !!instruction.trim() || start !== 1 || count !== 3;
+  useEffect(() => { onDirtyRef.current?.(formDirty); }, [formDirty]);
+  useEffect(() => () => { onDirtyRef.current?.(false); }, []);
 
   useEffect(() => {
     alive.current = true;
@@ -587,14 +604,17 @@ export default function PlanningWorkspace({
       <div className="page-heading compact-heading">
         <div>
           <div className="eyebrow">BLUEPRINT BEFORE THE FIRST WORD</div>
-          <h1>创作规划</h1>
-          <p>把大纲展开为相互关联的创作蓝图。所有记录描述未来规划。</p>
+          <h1>{initialTab === "characters" ? "人物与世界" : initialTab === "timeline" ? "时间线与伏笔" : initialTab === "style" ? "写作风格" : "大纲与卷章"}</h1>
+          <p>{initialTab && initialTab !== "overview" ? "查看同一规划包中的创作资料，可切换下方页签。所有记录描述未来规划。" : "把大纲展开为相互关联的创作蓝图。所有记录描述未来规划。"}</p>
         </div>
         <div className="planning-title-icon">
           <GitBranch size={26} strokeWidth={1.4} />
         </div>
       </div>
+      <details className="planning-generate-toggle" open={!initialTab || initialTab === "overview"}>
+      <summary>导入大纲与生成规划</summary>
       <section className="planning-generator">
+        <div className="planning-import-actions"><button className="button secondary small" onClick={onImport} disabled={!!busy}><Plus size={14} />导入已有大纲</button><button className="button secondary small" onClick={onPaste} disabled={!!busy}><PenLine size={14} />粘贴或手写大纲</button><span>总纲选用后，在这里分批展开卷纲、章纲与创作资料。</span></div>
         <div className="planning-generator-heading">
           <span className="card-eyebrow">
             <Sparkles size={15} />
@@ -733,6 +753,7 @@ export default function PlanningWorkspace({
           </button>
         )}
       </section>
+      </details>
       {error && (
         <div className="planning-error" role="alert">
           <CircleAlert size={16} />

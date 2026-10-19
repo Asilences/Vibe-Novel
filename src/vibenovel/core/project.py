@@ -12,7 +12,8 @@ from typing import Optional
 from vibenovel.errors import VibeNovelError
 from .files import DEVICES, cleanup_stage, digest, file_digest, is_link, json_bytes, read_json, safe_path, tree_files
 
-GENRES = ("football", "adventure", "campus", "alternate_history")
+LEGACY_GENRES = ("football", "adventure", "campus", "alternate_history")
+GENRES = (*LEGACY_GENRES, "general")
 DIRECTORIES = (
     "imports/original", "bible", "outlines/source", "outlines/proposals", "outlines/approved",
     "drafts", "chapters", "memory/events", "memory/states", "memory/summaries", "memory/threads",
@@ -28,6 +29,14 @@ def utc_now() -> str:
 def validate_id(novel_id: str) -> None:
     if not isinstance(novel_id, str) or not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", novel_id) or novel_id in DEVICES:
         raise VibeNovelError("作品 ID 需要小写字母开头的 1–64 位 ASCII slug，且不能是 Windows 设备名")
+
+
+def genre_prompt_path(project: Project) -> str:
+    """Resolve only supported rule modules; reading labels never become paths."""
+    genre = project.metadata.get("genre")
+    if genre not in GENRES:
+        raise VibeNovelError("作品题材规则模块无效")
+    return f"prompts/genres/{genre}.md"
 
 
 @dataclass(frozen=True)
@@ -87,7 +96,7 @@ class ProjectStore:
             raise VibeNovelError(f"作品目录已存在，未覆盖: {destination}")
         stage = Path(tempfile.mkdtemp(prefix=".init-", dir=novels))
         try:
-            metadata = {"schema_version": 1, "novel_id": novel_id, "title": title.strip(),
+            metadata = {"schema_version": 2 if genre == "general" else 1, "novel_id": novel_id, "title": title.strip(),
                         "genre": genre, "created_at": utc_now()}
             for name in DIRECTORIES:
                 (stage / name).mkdir(parents=True, exist_ok=True)
@@ -106,10 +115,11 @@ class ProjectStore:
         if not metadata_path.is_file():
             raise VibeNovelError(f"未找到 v3 作品: {novel_id}")
         metadata = read_json(metadata_path)
-        if (type(metadata.get("schema_version")) is not int or metadata["schema_version"] != 1
+        if (type(metadata.get("schema_version")) is not int or metadata["schema_version"] not in (1, 2)
                 or set(metadata) != {"schema_version", "novel_id", "title", "genre", "created_at"}):
-            raise VibeNovelError("作品配置版本或字段无效，需要 schema_version=1")
-        if metadata["novel_id"] != novel_id or metadata["genre"] not in GENRES:
+            raise VibeNovelError("作品配置版本或字段无效，需要 schema_version=1/2")
+        allowed_genres = LEGACY_GENRES if metadata["schema_version"] == 1 else GENRES
+        if metadata["novel_id"] != novel_id or metadata["genre"] not in allowed_genres:
             raise VibeNovelError("作品 ID 或题材不匹配")
         if (not isinstance(metadata["title"], str) or not metadata["title"].strip() or len(metadata["title"]) > 200
                 or any(ord(char) < 32 for char in metadata["title"])):

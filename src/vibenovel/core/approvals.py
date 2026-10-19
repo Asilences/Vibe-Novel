@@ -130,7 +130,8 @@ class ApprovalStore:
 
     def create(self, target: str, content: str, reason: str, impact: list[str],
                expected_hash: Optional[str], provenance: str = "AI_SUGGESTED",
-               dependencies: Optional[dict[str, str]] = None) -> dict:
+               dependencies: Optional[dict[str, str]] = None,
+               expected_dependency_versions: Optional[dict[str, str]] = None) -> dict:
         if _kind(self.project, target) != "canonical":
             raise VibeNovelError("提案目标只允许 bible、正式章节、memory 和已批准大纲")
         if target.startswith("chapters/") and not re.fullmatch(r"chapters/ch0*[1-9][0-9]*\.md", target):
@@ -149,6 +150,14 @@ class ApprovalStore:
                 _check_dependencies(self.project, dependencies)
                 if target in dependencies:
                     raise VibeNovelError("提案不能把目标文件本身作为依赖；请改用独立来源，避免应用后立即失效")
+            if expected_dependency_versions is not None:
+                if (dependencies is None or not isinstance(expected_dependency_versions, dict)
+                        or set(expected_dependency_versions) != set(dependencies)
+                        or any(not isinstance(value, str) or not HASH.fullmatch(value)
+                               for value in expected_dependency_versions.values())):
+                    raise VibeNovelError("预期提案依赖历史快照无效")
+                if expected_dependency_versions != _dependency_versions(state, dependencies):
+                    raise ConflictError("准备提案期间来源历史已变化，请刷新后重新创建提案")
             before = _read_raw(self.project, target)
             _check_expected(before, expected_hash)
             proposal = {"id": uuid4().hex, "novel_id": self.project.novel_id, "target": target,

@@ -56,7 +56,7 @@ export type Job = {
   created_at: string;
   result_path?: string;
   error?: string;
-  request?: { instruction?: string; document_path?: string; document_hash?: string; selection?: { start_char: number; end_char: number }; editorial?: { goals: string[]; intensity: "conservative" | "standard" | "deep" } };
+  request?: { instruction?: string; document_path?: string; document_hash?: string; document_version_id?: string; selection?: { start_char: number; end_char: number }; editorial?: { goals: string[]; intensity: "conservative" | "standard" | "deep" } };
   logs?: Array<string | Record<string, unknown>>;
   usage?: Record<string, unknown> | null;
   cost_usd?: number | null;
@@ -354,6 +354,7 @@ export const formatDate = (date?: string) =>
       })
     : "—";
 export const kindLabels: Record<string, string> = {
+  generate_story_outline: "生成初版总纲",
   build_blueprint: "生成创作规划",
   expand_outline: "扩写大纲",
   draft: "章节起草",

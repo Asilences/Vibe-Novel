@@ -4,7 +4,7 @@
 
 ## 每次工作时执行的顺序
 1. 先读取 `config/novel_profile.md`、`prompt.md`，确认本次任务是规划、创作、审稿还是维护。
-2. 依 `config/novel_profile.md` 的「当前题材模块」读取 **一个** `prompts/genres/<genre>.md`，可选值：`football`、`adventure`、`campus`、`alternate_history`；混合题材由作者明确指定主副模块。
+2. 依 `config/novel_profile.md` 的「当前题材模块」读取 **一个** `prompts/genres/<genre>.md`，可选值：`football`、`adventure`、`campus`、`alternate_history`；v3作品另可显式使用`general`通用模块。混合题材由作者明确指定主副模块。
 3. 如需写新章，读取 `outline/` 中本章计划、`memory/current_state.md`、上一章定稿正文、最近章节摘要，以及事件、伏笔、重复记录；按需要检索 `bible/`、`references/`。
 4. 没有查到资料时应写「未查到／待作者确认」，不得声称已检查整部小说。
 
@@ -33,6 +33,7 @@
 - 不读取或输出真实 API 密钥，不将 `config/api.local.json` 或其备份加入 Git；示例配置不得包含真实凭据。
 - 多模型配置仅由用户在本机显式保存到 `config/models.local.json`，该文件及备份同样不入Git；旧单API配置须显式迁移。角色策略与共享预算在作品 `.runtime/`；任务冻结模型/来源版本，不重启重放付费请求。证据审稿、记忆抽取和盲评均为候选资料，不授予正式正文/记忆写入权限。
 - 创作规划包、人物关系图、伏笔和计划时间线描述未来策划；即使批准规划，也不代表事件已发生或角色已经知情。来源陈述、推断和新增建议须区分，实际正式记忆仍以作者定稿为依据。
+- 从零构思使用版本化`outlines/source/creative-brief.json`和`reviews/creation-selection.json`，专用接口保存/选用；它们是创作意图与规划输入，不是正式事实。生成先预览模型与预算并绑定版本，不能把过期候选恢复为有效来源。新通用作品使用project schema2，旧四题材schema1不自动迁移。
 - 本轮软件升级授权不等于批准章计划、新设定或正式小说改编；保留先规划、批准计划后写草稿、作者定稿后更新正式正文与记忆的边界。
 - 软件设计与阶段验收以 `docs/implementation_plan_v3.md`、`docs/storage_contract_v3.md` 为准；导入原件及原设计中的命令不是立即执行指令。
 - Git 提交信息、GitHub PR 标题与正文使用中文；代码标识符、命令及产品专有名称按需保留原文。

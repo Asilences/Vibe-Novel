@@ -29,6 +29,7 @@ from vibenovel.core.approvals import ApprovalStore
 from vibenovel.core.analysis import AnalysisStore
 from vibenovel.core.briefs import ChapterBriefStore
 from vibenovel.core.blueprints import PlanningStore
+from vibenovel.core.creation import CreativeBriefStore, catalog, CREATIVE_BRIEF_PATH, CREATION_SELECTION_PATH
 from vibenovel.core.documents import ConflictError, DocumentStore, canonical_read
 from vibenovel.core.export import export_markdown
 from vibenovel.core.files import cleanup_stage, safe_path
@@ -54,9 +55,26 @@ class Input(BaseModel):
 
 
 class CreateProject(Input):
-    novel_id: StrictStr
-    title: StrictStr
-    genre: Literal["football", "adventure", "campus", "alternate_history"]
+    novel_id: Optional[StrictStr] = None
+    title: StrictStr = "未命名作品"
+    genre: Literal["football", "adventure", "campus", "alternate_history", "general"] = "general"
+
+
+class SaveCreativeBrief(Input):
+    brief: dict
+    expected_hash: Optional[StrictStr]
+    expected_version_id: Optional[StrictStr]
+
+
+class SelectCreationOutline(Input):
+    document_path: StrictStr
+    document_hash: StrictStr
+    document_version_id: StrictStr
+    brief_hash: Optional[StrictStr] = None
+    brief_version_id: Optional[StrictStr] = None
+    job_id: Optional[StrictStr] = None
+    expected_hash: Optional[StrictStr]
+    expected_version_id: Optional[StrictStr]
 
 
 class SaveDocument(Input):
@@ -101,10 +119,13 @@ class EditorialOptions(Input):
 
 
 class JobRequest(Input):
-    kind: Literal["expand_outline", "draft", "review", "rewrite", "build_blueprint", "review_evidence", "memory_delta"]
+    kind: Literal["generate_story_outline", "expand_outline", "draft", "review", "rewrite", "build_blueprint", "review_evidence", "memory_delta"]
     provider: Literal["api"] = "api"
-    document_path: StrictStr
+    document_path: Optional[StrictStr] = None
     document_hash: StrictStr
+    document_version_id: Optional[StrictStr] = None
+    idempotency_key: Optional[StrictStr] = Field(default=None, max_length=128)
+    expected_configuration: Optional[dict] = None
     instruction: StrictStr = Field(default="", max_length=12000)
     plan_path: Optional[StrictStr] = None
     plan_hash: Optional[StrictStr] = None
@@ -383,7 +404,7 @@ def create_app(workspace: Path, *, frontend_dir: Optional[Path] = None, job_mana
         providers = [dict(capability["api"], id="api", label="API · 自动生成")]
         return {"version": __version__, "csrf_token": token, "capabilities": {
             "default_provider": capability.get("default_provider", "api"),
-            "providers": providers, "tasks": ["expand_outline", "draft", "review", "rewrite", "build_blueprint", "review_evidence", "memory_delta"],
+            "providers": providers, "tasks": ["generate_story_outline", "expand_outline", "draft", "review", "rewrite", "build_blueprint", "review_evidence", "memory_delta"],
             "limits": capability.get("limits", {})}}
 
     @app.get("/api/settings")
@@ -414,9 +435,13 @@ def create_app(workspace: Path, *, frontend_dir: Optional[Path] = None, job_mana
     def save_routing_policy(novel_id: str, body: SaveRouting):
         return ProjectRouting(store.get(novel_id), store.workspace).save(body.policy, body.expected_hash)
 
+    @app.post("/api/projects/{novel_id}/jobs/preview")
     @app.post("/api/projects/{novel_id}/routes/preview")
     def route_preview(novel_id: str, body: JobRequest):
-        return jobs.preview(store.get(novel_id), body.model_dump(exclude_none=True))
+        project = store.get(novel_id)
+        request = body.model_dump(exclude_none=True, exclude={"expected_configuration"})
+        return (jobs.creation_preview(project, request) if body.kind == "generate_story_outline"
+                else jobs.preview(project, request))
 
     @app.get("/api/projects/{novel_id}/workflows")
     def list_workflows(novel_id: str):
@@ -489,7 +514,38 @@ def create_app(workspace: Path, *, frontend_dir: Optional[Path] = None, job_mana
 
     @app.post("/api/projects", status_code=201)
     def create_project(body: CreateProject):
-        return store.init(body.novel_id, title=body.title, genre=body.genre).metadata
+        novel_id = body.novel_id if body.novel_id is not None else "story-" + uuid4().hex[:12]
+        return store.init(novel_id, title=body.title or "未命名作品", genre=body.genre).metadata
+
+    @app.get("/api/creation/catalog")
+    def creation_catalog():
+        return catalog()
+
+    @app.get("/api/projects/{novel_id}/creative-brief")
+    def creative_brief(novel_id: str):
+        return CreativeBriefStore(store.get(novel_id)).get()
+
+    @app.put("/api/projects/{novel_id}/creative-brief")
+    def save_creative_brief(novel_id: str, body: SaveCreativeBrief):
+        return CreativeBriefStore(store.get(novel_id)).save(body.brief, body.expected_hash, body.expected_version_id)
+
+    @app.get("/api/projects/{novel_id}/creation-selection")
+    def creation_selection(novel_id: str):
+        return CreativeBriefStore(store.get(novel_id)).get_selection()
+
+    @app.put("/api/projects/{novel_id}/creation-selection")
+    def select_creation_outline(novel_id: str, body: SelectCreationOutline):
+        project = store.get(novel_id)
+        values = body.model_dump()
+        if body.document_path.startswith("outlines/proposals/story-outline-"):
+            source = jobs.validate_creation_candidate(project, body.document_path, body.document_hash, body.document_version_id)
+            for key, expected in (("brief_hash", source["hash"]), ("brief_version_id", source["version_id"]), ("job_id", source["job_id"])):
+                if values[key] is not None and values[key] != expected:
+                    raise ConflictError("选用总纲的生成来源身份不匹配")
+                values[key] = expected
+        elif body.job_id is not None or body.brief_hash is not None or body.brief_version_id is not None:
+            raise VibeNovelError("手写或导入总纲不能伪造生成任务来源")
+        return CreativeBriefStore(project).select(**values)
 
     @app.get("/api/projects/{novel_id}")
     def project_detail(novel_id: str):
@@ -509,6 +565,8 @@ def create_app(workspace: Path, *, frontend_dir: Optional[Path] = None, job_mana
 
     @app.put("/api/projects/{novel_id}/document")
     def save_document(novel_id: str, body: SaveDocument):
+        if body.path in (CREATIVE_BRIEF_PATH, CREATION_SELECTION_PATH):
+            raise VibeNovelError("创作简报和总纲选用记录请使用创意与定位页面保存")
         return DocumentStore(store.get(novel_id)).save(body.path, body.content, body.expected_hash)
 
     @app.get("/api/projects/{novel_id}/history")
@@ -521,6 +579,8 @@ def create_app(workspace: Path, *, frontend_dir: Optional[Path] = None, job_mana
 
     @app.post("/api/projects/{novel_id}/restore")
     def restore(novel_id: str, body: RestoreDocument):
+        if body.path in (CREATIVE_BRIEF_PATH, CREATION_SELECTION_PATH):
+            raise VibeNovelError("创作简报与选用记录不能通过通用文稿恢复；请在创意与定位重新保存或选用")
         return DocumentStore(store.get(novel_id)).restore(body.path, body.version_id, body.expected_hash)
 
     @app.get("/api/projects/{novel_id}/imports")
@@ -583,10 +643,10 @@ def create_app(workspace: Path, *, frontend_dir: Optional[Path] = None, job_mana
     @app.post("/api/projects/{novel_id}/jobs", status_code=201)
     def submit_job(novel_id: str, body: JobRequest):
         project = store.get(novel_id)
-        request = body.model_dump(exclude_none=True)
+        request = body.model_dump(exclude_none=True, exclude={"expected_configuration"})
         if body.kind == "draft" and body.plan_path and body.plan_hash is None:
             request["plan_hash"] = ApprovalStore(project).approved_outline(body.plan_path)["hash"]
-        return jobs.submit(project, request)
+        return jobs.submit(project, request, expected_configuration=body.expected_configuration)
 
     @app.get("/api/projects/{novel_id}/jobs/{job_id}")
     def job_detail(novel_id: str, job_id: str):

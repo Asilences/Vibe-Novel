@@ -183,6 +183,20 @@ class BlueprintTests(unittest.TestCase):
         with self.assertRaises(ConflictError):
             self.planning.propose(candidate["path"], candidate["hash"])
 
+    def test_proposal_rechecks_source_history_after_read_before_create(self):
+        candidate = self.candidate()
+        original_create = ApprovalStore.create
+
+        def change_before_create(store, *args, **kwargs):
+            changed = self.documents.save(self.source["path"], "临时变更", self.source["hash"])
+            restored = self.documents.save(self.source["path"], self.source["content"], changed["hash"])
+            self.assertEqual(restored["hash"], self.source["hash"])
+            return original_create(store, *args, **kwargs)
+
+        with patch.object(ApprovalStore, "create", new=change_before_create), self.assertRaises(ConflictError):
+            self.planning.propose(candidate["path"], candidate["hash"])
+        self.assertEqual(self.approvals.list(), [])
+
     def test_only_applied_exact_package_can_extract_and_never_auto_applies(self):
         candidate = self.candidate()
         with self.assertRaises(ConflictError):

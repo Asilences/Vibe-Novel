@@ -13,7 +13,7 @@ from .model_registry import ModelRegistry, ROLES, resolve_snapshot
 
 POLICY_PATH = ".runtime/model-routing.json"
 LEDGER_PATH = ".runtime/model-budget.json"
-KIND_ROLES = {"expand_outline": "planner", "build_blueprint": "planner", "draft": "writer",
+KIND_ROLES = {"expand_outline": "planner", "build_blueprint": "planner", "generate_story_outline": "planner", "draft": "writer",
               "rewrite": "writer", "review": "reviewer", "review_evidence": "reviewer", "memory_delta": "memory"}
 _IDENTITY = re.compile(r"[A-Za-z0-9_-]{1,80}")
 
