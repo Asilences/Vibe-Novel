@@ -196,9 +196,11 @@ class PlanningTaskTests(unittest.TestCase):
 
     def test_studio_provider_has_longer_bounded_timeout_without_changing_standalone_adapter(self):
         manager = JobManager(self.workspace)
-        with patch("vibenovel.studio.jobs.OpenAICompatibleProvider") as adapter:
-            manager._factory("api")
-        adapter.assert_called_once_with(workspace=self.workspace, timeout=180)
+        with patch("vibenovel.studio.jobs.OpenAICompatibleProvider") as adapter, \
+                patch("vibenovel.studio.routing.resolve_snapshot", return_value="frozen-settings") as resolve:
+            manager._make_provider({"id": "frozen-profile"})
+        resolve.assert_called_once_with(self.workspace, {"id": "frozen-profile"})
+        adapter.assert_called_once_with(settings="frozen-settings", timeout=180)
 
     def test_blueprint_rejects_approved_and_canonical_inputs_before_model_call(self):
         manager, provider = self.manager()

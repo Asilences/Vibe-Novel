@@ -27,6 +27,7 @@ class StudioSettings:
     model: str = field(default="", repr=False)
     api_key: str = field(default="", repr=False)
     allow_loopback: bool = False
+    max_output_tokens: Optional[int] = None
 
 
 def _unique(pairs):

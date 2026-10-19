@@ -15,6 +15,7 @@ from vibenovel.core.toolkit import WritingToolkitStore
 from vibenovel.errors import VibeNovelError
 from vibenovel.studio.jobs import JobManager
 from vibenovel.studio.providers import GenerationResult, ProviderError
+from vibenovel.studio.routing import ProjectRouting, default_policy
 
 
 class EditorialProvider:
@@ -209,6 +210,9 @@ class EditorialJobTests(unittest.TestCase):
                 manager.close()
 
     def test_failed_request_retry_preserves_selection_and_editorial_contract(self):
+        policy = default_policy()
+        policy["max_calls"] = 2
+        ProjectRouting(self.project, self.workspace).save(policy, None)
         manager, provider = self.manager(EditorialProvider(error=True))
         first = self.wait(manager, manager.submit(self.project, self.request())["id"])
         self.assertEqual(first["state"], "failed")

@@ -5,7 +5,7 @@ import { api, ApiError } from "./api";
 import type { APISettingsData } from "./api";
 import { Modal } from "./ui";
 
-export default function APISettings({ onClose, onSaved }: { onClose: () => void; onSaved: () => Promise<void> }) {
+export default function APISettings({ onClose, onSaved, onModels }: { onClose: () => void; onSaved: () => Promise<void>; onModels: () => void }) {
   const [settings, setSettings] = useState<APISettingsData | null>(null);
   const [latestSettings, setLatestSettings] = useState<APISettingsData | null>(null);
   const [preset, setPreset] = useState("custom");
@@ -17,6 +17,7 @@ export default function APISettings({ onClose, onSaved }: { onClose: () => void;
   const [clearKey, setClearKey] = useState(false);
   const [allowLoopback, setAllowLoopback] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [multiModelActive, setMultiModelActive] = useState(false);
   const [saving, setSaving] = useState(false);
   const [reloading, setReloading] = useState(false);
   const [error, setError] = useState("");
@@ -32,9 +33,10 @@ export default function APISettings({ onClose, onSaved }: { onClose: () => void;
   useEffect(() => {
     alive.current = true;
     const request = ++loadRequest.current;
-    void api<APISettingsData>("/settings").then((value) => {
+    void Promise.all([api<APISettingsData>("/settings"), api<{ migration_required: boolean }>("/model-registry")]).then(([value, registry]) => {
       if (!alive.current || request !== loadRequest.current) return;
       setSettings(value);
+      setMultiModelActive(!registry.migration_required);
       fillPublicFields(value);
     }).catch(() => {
       if (alive.current && request === loadRequest.current) setError("无法读取本机 API 设置，请稍后重试。");
@@ -49,8 +51,9 @@ export default function APISettings({ onClose, onSaved }: { onClose: () => void;
     const request = ++loadRequest.current;
     setReloading(true); setError(""); setNotice("");
     try {
-      const value = await api<APISettingsData>("/settings");
+      const [value, registry] = await Promise.all([api<APISettingsData>("/settings"), api<{ migration_required: boolean }>("/model-registry")]);
       if (!alive.current || request !== loadRequest.current) return;
+      setMultiModelActive(!registry.migration_required);
       if (!settings) { setSettings(value); fillPublicFields(value); }
       else if (value.hash !== settings.hash) setLatestSettings(value);
       else { setLatestSettings(null); setNotice("本机配置没有变化，当前输入已保留。"); }
@@ -60,7 +63,7 @@ export default function APISettings({ onClose, onSaved }: { onClose: () => void;
   }
   async function save(event: FormEvent) {
     event.preventDefault();
-    if (!settings || busy || latestSettings) return;
+    if (!settings || busy || latestSettings || multiModelActive) return;
     if (endpointNeedsKey) { setError("更换 API 地址时，请填写该服务的密钥，或勾选清除原密钥。"); return; }
     const submittedSecret = secret;
     setSaving(true);
@@ -97,7 +100,7 @@ export default function APISettings({ onClose, onSaved }: { onClose: () => void;
     } finally { if (alive.current) setSaving(false); }
   }
   return <Modal title="模型与 API 设置" subtitle="生成任务统一通过 API 执行。配置保存在本机，不会自动测试连通性。" onClose={onClose}>
-    {loading ? <div className="analysis-loading"><LoaderCircle size={20} className="spin" />读取配置状态…</div> : settings ? <form className="modal-form api-settings" onSubmit={(event) => void save(event)}>
+    {loading ? <div className="analysis-loading"><LoaderCircle size={20} className="spin" />读取配置状态…</div> : multiModelActive ? <div className="modal-form api-settings"><div className="analysis-warning"><ShieldCheck size={16} /><span>本机已启用多模型注册表。当前任务使用“多模型协作”中保存的模型和作品角色绑定，请在那里修改密钥与模型配置。</span></div><p className="form-note">原单 API 配置保留供回顾；修改它不会更新当前任务路线。</p><div className="modal-footer"><button type="button" className="button secondary" onClick={onClose}>关闭</button><button type="button" className="button primary" onClick={onModels}>打开多模型协作</button></div></div> : settings ? <form className="modal-form api-settings" onSubmit={(event) => void save(event)}>
       <div className="api-key-status"><KeyRound size={16} /><strong>{settings.api.has_api_key ? "已配置密钥" : "尚未配置密钥"}</strong><span>已保存的密钥不会回显</span></div>
       <label>服务商<select value={preset} disabled={busy} onChange={(event) => {
         const id = event.target.value;

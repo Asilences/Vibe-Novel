@@ -315,12 +315,21 @@ class DocumentStore:
 
     def save(self, path: str, content: str, expected_hash: Optional[str], provenance: str = "AUTHOR", *,
              expected_fingerprint: Optional[str] = None, expected_sources: Optional[dict[str, str]] = None,
-             expected_revision: Optional[int] = None, expected_runtime_sources: Optional[dict] = None) -> dict:
+             expected_revision: Optional[int] = None, expected_runtime_sources: Optional[dict] = None,
+             expected_source_versions: Optional[dict] = None) -> dict:
         if _kind(self.project, path) != "editable":
             raise VibeNovelError("只允许直接编辑草稿、候选大纲和审稿；正式内容必须经提案批准")
         raw = _content_bytes(path, content)
         provenance = _provenance(provenance)
         with self.storage.locked() as state:
+            if expected_source_versions is not None:
+                if not isinstance(expected_source_versions, dict) or len(expected_source_versions) > 100:
+                    raise VibeNovelError("来源历史版本快照无效")
+                for source, version in expected_source_versions.items():
+                    _kind(self.project, source)
+                    history = state["history"].get(source, [])
+                    if (history[-1]["id"] if history else None) != version:
+                        raise ConflictError("来源文档历史版本已变化，旧候选未发布")
             if expected_runtime_sources is not None:
                 if (not isinstance(expected_runtime_sources, dict)
                         or not expected_runtime_sources

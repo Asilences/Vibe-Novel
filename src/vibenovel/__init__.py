@@ -1,3 +1,3 @@
 """VibeNovel's offline, model-independent core."""
 
-__version__ = "3.0.0a6"
+__version__ = "3.0.0a7"
