@@ -41,6 +41,9 @@ from vibenovel.core.manuscripts import ManuscriptStore
 from vibenovel.errors import MissingDocumentError, VibeNovelError
 from .jobs import JobManager
 from .settings import public_settings, save_settings
+from .model_registry import ModelRegistry
+from .routing import ProjectRouting
+from .workflows import WorkflowManager
 
 MAX_REQUEST_BYTES = 15 * 1024 * 1024
 LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
@@ -98,7 +101,7 @@ class EditorialOptions(Input):
 
 
 class JobRequest(Input):
-    kind: Literal["expand_outline", "draft", "review", "rewrite", "build_blueprint"]
+    kind: Literal["expand_outline", "draft", "review", "rewrite", "build_blueprint", "review_evidence", "memory_delta"]
     provider: Literal["api"] = "api"
     document_path: StrictStr
     document_hash: StrictStr
@@ -133,6 +136,45 @@ class APISettings(Input):
 class SaveSettings(Input):
     expected_hash: Optional[StrictStr]
     api: APISettings
+
+
+class SaveRegistry(Input):
+    expected_hash: Optional[StrictStr]
+    profiles: list[dict] = Field(min_length=1, max_length=16)
+
+
+class ExpectedConfig(Input):
+    expected_hash: Optional[StrictStr]
+
+
+class SaveRouting(Input):
+    expected_hash: Optional[StrictStr]
+    policy: dict
+
+
+class CreateWorkflow(Input):
+    request: JobRequest
+    review: bool = True
+    memory: bool = True
+    independent_review: bool = False
+
+
+class ReviseWorkflow(Input):
+    issue_ids: list[StrictStr] = Field(min_length=1, max_length=20)
+    instruction: StrictStr = Field(default="", max_length=4000)
+
+
+class BenchmarkPair(Input):
+    candidate_a_path: StrictStr
+    candidate_a_hash: StrictStr
+    candidate_b_path: StrictStr
+    candidate_b_hash: StrictStr
+
+
+class BenchmarkVote(Input):
+    decision: Literal["prefer_a", "prefer_b", "tie"]
+    note: StrictStr = Field(default="", max_length=4000)
+    expected_hash: Optional[StrictStr] = None
 
 
 class AnalysisSample(Input):
@@ -289,6 +331,7 @@ def create_app(workspace: Path, *, frontend_dir: Optional[Path] = None, job_mana
     store = ProjectStore(workspace)
     config = load_config(store.workspace)
     jobs = job_manager if job_manager is not None else JobManager(store.workspace)
+    workflows = WorkflowManager(jobs)
     token = secrets.token_urlsafe(32)
     frontend = (Path(frontend_dir) if frontend_dir is not None else
                 Path(__file__).resolve().parents[3] / "studio" / "dist").resolve()
@@ -329,7 +372,7 @@ def create_app(workspace: Path, *, frontend_dir: Optional[Path] = None, job_mana
 
     @app.exception_handler(RequestValidationError)
     async def bad_request(request, exc):
-        if request.url.path == "/api/settings":
+        if request.url.path in ("/api/settings", "/api/model-registry", "/api/model-registry/migrate"):
             return JSONResponse({"detail": "API 设置请求字段无效；请检查地址、模型、密钥和配置版本"}, status_code=422)
         fields = ", ".join(".".join(str(item) for item in error["loc"]) for error in exc.errors())
         return JSONResponse({"detail": "请求字段无效: " + fields}, status_code=422)
@@ -340,7 +383,7 @@ def create_app(workspace: Path, *, frontend_dir: Optional[Path] = None, job_mana
         providers = [dict(capability["api"], id="api", label="API · 自动生成")]
         return {"version": __version__, "csrf_token": token, "capabilities": {
             "default_provider": capability.get("default_provider", "api"),
-            "providers": providers, "tasks": ["expand_outline", "draft", "review", "rewrite", "build_blueprint"],
+            "providers": providers, "tasks": ["expand_outline", "draft", "review", "rewrite", "build_blueprint", "review_evidence", "memory_delta"],
             "limits": capability.get("limits", {})}}
 
     @app.get("/api/settings")
@@ -350,6 +393,90 @@ def create_app(workspace: Path, *, frontend_dir: Optional[Path] = None, job_mana
     @app.put("/api/settings")
     def update_api_settings(body: SaveSettings):
         return save_settings(store.workspace, body.api.model_dump(), body.expected_hash)
+
+    @app.get("/api/model-registry")
+    def model_registry():
+        return ModelRegistry(store.workspace).public()
+
+    @app.put("/api/model-registry")
+    def save_model_registry(body: SaveRegistry):
+        return ModelRegistry(store.workspace).save({"profiles": body.profiles}, body.expected_hash)
+
+    @app.post("/api/model-registry/migrate")
+    def migrate_model_registry(body: ExpectedConfig):
+        return ModelRegistry(store.workspace).migrate(body.expected_hash)
+
+    @app.get("/api/projects/{novel_id}/routing")
+    def routing_policy(novel_id: str):
+        return ProjectRouting(store.get(novel_id), store.workspace).public()
+
+    @app.put("/api/projects/{novel_id}/routing")
+    def save_routing_policy(novel_id: str, body: SaveRouting):
+        return ProjectRouting(store.get(novel_id), store.workspace).save(body.policy, body.expected_hash)
+
+    @app.post("/api/projects/{novel_id}/routes/preview")
+    def route_preview(novel_id: str, body: JobRequest):
+        return jobs.preview(store.get(novel_id), body.model_dump(exclude_none=True))
+
+    @app.get("/api/projects/{novel_id}/workflows")
+    def list_workflows(novel_id: str):
+        return workflows.list(store.get(novel_id))
+
+    @app.post("/api/projects/{novel_id}/workflows", status_code=201)
+    def create_workflow(novel_id: str, body: CreateWorkflow):
+        return workflows.create(store.get(novel_id), body.request.model_dump(exclude_none=True),
+                                body.review, body.memory, body.independent_review)
+
+    @app.get("/api/projects/{novel_id}/workflows/{identity}")
+    def read_workflow(novel_id: str, identity: str):
+        return workflows.get(store.get(novel_id), identity)
+
+    @app.post("/api/projects/{novel_id}/workflows/{identity}/advance")
+    def advance_workflow(novel_id: str, identity: str):
+        return workflows.advance(store.get(novel_id), identity)
+
+    @app.post("/api/projects/{novel_id}/workflows/{identity}/pause")
+    def pause_workflow(novel_id: str, identity: str):
+        return workflows.stop(store.get(novel_id), identity, "pause")
+
+    @app.post("/api/projects/{novel_id}/workflows/{identity}/cancel")
+    def cancel_workflow(novel_id: str, identity: str):
+        return workflows.stop(store.get(novel_id), identity, "cancel")
+
+    @app.post("/api/projects/{novel_id}/workflows/{identity}/revise")
+    def revise_workflow(novel_id: str, identity: str, body: ReviseWorkflow):
+        return workflows.revise(store.get(novel_id), identity, body.issue_ids, body.instruction)
+
+    @app.get("/api/projects/{novel_id}/benchmarks")
+    def list_benchmarks(novel_id: str):
+        from vibenovel.core.novelbench import NovelBenchStore
+        return NovelBenchStore(store.get(novel_id)).list()
+
+    @app.post("/api/projects/{novel_id}/benchmarks", status_code=201)
+    def create_benchmark(novel_id: str, body: BenchmarkPair):
+        from vibenovel.core.novelbench import NovelBenchStore
+        return NovelBenchStore(store.get(novel_id)).create(body.candidate_a_path, body.candidate_a_hash,
+                                                          body.candidate_b_path, body.candidate_b_hash)
+
+    @app.get("/api/projects/{novel_id}/benchmarks/{identity}")
+    def read_benchmark(novel_id: str, identity: str):
+        from vibenovel.core.novelbench import NovelBenchStore
+        return NovelBenchStore(store.get(novel_id)).get(identity)
+
+    @app.post("/api/projects/{novel_id}/benchmarks/{identity}/vote")
+    def vote_benchmark(novel_id: str, identity: str, body: BenchmarkVote):
+        from vibenovel.core.novelbench import NovelBenchStore
+        return NovelBenchStore(store.get(novel_id)).vote(identity, body.decision, body.note, body.expected_hash)
+
+    @app.post("/api/projects/{novel_id}/benchmarks/{identity}/reveal")
+    def reveal_benchmark(novel_id: str, identity: str):
+        from vibenovel.core.novelbench import NovelBenchStore
+        return NovelBenchStore(store.get(novel_id)).reveal(identity)
+
+    @app.get("/api/projects/{novel_id}/benchmarks/{identity}/export")
+    def export_benchmark(novel_id: str, identity: str):
+        from vibenovel.core.novelbench import NovelBenchStore
+        return NovelBenchStore(store.get(novel_id)).export(identity)
 
     def consistent_status(project):
         with canonical_read(project) as snapshot:

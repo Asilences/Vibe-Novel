@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "revision": 1,
+  "profiles": [
+    {
+      "id": "deepseek",
+      "label": "DeepSeek",
+      "base_url": "https://api.deepseek.com",
+      "model": "",
+      "api_key": "",
+      "allow_loopback": false,
+      "roles": ["planner", "writer", "reviewer", "memory"],
+      "context_tokens": 128000,
+      "max_output_tokens": 8192,
+      "price_input_usd": null,
+      "price_output_usd": null
+    },
+    {
+      "id": "mimo",
+      "label": "小米 MiMo",
+      "base_url": "https://api.xiaomimimo.com/v1",
+      "model": "",
+      "api_key": "",
+      "allow_loopback": false,
+      "roles": ["planner", "writer", "reviewer", "memory"],
+      "context_tokens": 128000,
+      "max_output_tokens": 8192,
+      "price_input_usd": null,
+      "price_output_usd": null
+    },
+    {
+      "id": "glm",
+      "label": "智谱 GLM",
+      "base_url": "https://open.bigmodel.cn/api/paas/v4",
+      "model": "",
+      "api_key": "",
+      "allow_loopback": false,
+      "roles": ["planner", "writer", "reviewer", "memory"],
+      "context_tokens": 128000,
+      "max_output_tokens": 8192,
+      "price_input_usd": null,
+      "price_output_usd": null
+    },
+    {
+      "id": "doubao",
+      "label": "豆包 / 火山方舟",
+      "base_url": "https://ark.cn-beijing.volces.com/api/v3",
+      "model": "",
+      "api_key": "",
+      "allow_loopback": false,
+      "roles": ["planner", "writer", "reviewer", "memory"],
+      "context_tokens": 128000,
+      "max_output_tokens": 8192,
+      "price_input_usd": null,
+      "price_output_usd": null
+    }
+  ]
+}

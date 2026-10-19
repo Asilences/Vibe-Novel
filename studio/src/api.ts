@@ -60,6 +60,9 @@ export type Job = {
   logs?: Array<string | Record<string, unknown>>;
   usage?: Record<string, unknown> | null;
   cost_usd?: number | null;
+  route?: Record<string, unknown> | null;
+  attempts?: Array<Record<string, unknown>>;
+  budget_summary?: Record<string, unknown> | null;
   context_sources?: Record<string, string>;
   recovery_available?: boolean;
   recovery_candidate?: string;
@@ -68,6 +71,30 @@ export type Job = {
   result_version_id?: string;
   editorial_context?: { selection?: { start_char: number; end_char: number }; goals: string[]; intensity: string; sources: Record<string, string>; omitted: unknown[]; runtime_sources?: Record<string, string>; prompt_budget?: { characters: number; limit: number } };
 };
+export type ModelRole = "planner" | "writer" | "reviewer" | "memory";
+export type ModelProfile = {
+  id: string; label: string; base_url: string; model: string; allow_loopback: boolean;
+  roles: ModelRole[]; context_tokens: number; max_output_tokens: number;
+  price_input_usd: number | null; price_output_usd: number | null; has_api_key: boolean;
+};
+export type ModelRegistry = {
+  hash: string | null; revision: number; migration_required: boolean;
+  profiles: ModelProfile[]; presets: APISettingsData["presets"];
+};
+export type RoutingPolicy = {
+  bindings: Record<ModelRole, { primary: string; fallbacks: string[] }>;
+  max_calls: number; max_tokens: number; max_cost_usd: number | null; max_attempts: number;
+};
+export type RoutingSettings = { hash: string | null; revision: number; policy: RoutingPolicy };
+export type ModelWorkflow = {
+  id: string; state: string; created_at?: string; error?: string;
+  nodes: { id?: string; job_id?: string; kind: string; state: string; result_path?: string; result_hash?: string; result_version_id?: string; route?: Record<string, unknown> }[];
+  budget_summary?: Record<string, unknown>; request?: Record<string, unknown>;
+  revision_rounds?: number; independent_review?: boolean;
+  stale?: boolean; drift?: string | null;
+};
+export type EvidenceReview = { target_path: string; target_hash: string; target_version_id: string | null; unchecked: string[]; issues: { id: string; quote: string; start_char: number; end_char: number; severity: string; category: string; explanation: string; suggestion: string }[] };
+export type Benchmark = { id: string; hash: string; created_at: string; stale: boolean; status: "awaiting_vote" | "voted"; candidates?: { label: "A" | "B"; content: string; hash: string }[]; vote?: { decision: "prefer_a" | "prefer_b" | "tie"; note: string; at: string } | null; limitations: string[] };
 export type Imported = {
   import_id: string;
   original_name: string;
@@ -332,6 +359,8 @@ export const kindLabels: Record<string, string> = {
   draft: "章节起草",
   review: "独立审稿",
   rewrite: "局部改写",
+  review_evidence: "证据审稿",
+  memory_delta: "候选记忆抽取",
 };
 export const stateLabels: Record<string, string> = {
   pending: "待作者审批",
@@ -348,6 +377,8 @@ export const stateLabels: Record<string, string> = {
   cancelling: "正在取消",
   interrupted: "已中断",
   paused: "已暂停",
+  awaiting_advance: "等待启动下一节点",
+  ready: "候选流程已完成",
 };
 export const activeStates = new Set([
   "queued",

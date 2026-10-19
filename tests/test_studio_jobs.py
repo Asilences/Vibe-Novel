@@ -21,6 +21,7 @@ from vibenovel.errors import VibeNovelError
 from vibenovel.studio.jobs import JobManager
 from vibenovel.studio.providers import (GenerationResult, OpenAICompatibleProvider, ProviderError,
                                        capabilities)
+from vibenovel.studio.routing import ProjectRouting, default_policy
 
 
 class FakeProvider:
@@ -193,6 +194,9 @@ class StudioJobTests(unittest.TestCase):
         self.assertIn("作者批准的章计划", provider.prompt)
 
     def test_cancel_discards_upstream_output_and_explicit_retry_links_new_job(self):
+        policy = default_policy()
+        policy["max_calls"] = 2
+        ProjectRouting(self.project, self.workspace).save(policy, None)
         manager, provider = self.manager(FakeProvider(blocked=True))
         job = manager.submit(self.project, self.request())
         self.assertTrue(provider.started.wait(2))
@@ -204,6 +208,19 @@ class StudioJobTests(unittest.TestCase):
         self.assertEqual(self.wait_state(manager, new["id"], {"succeeded", "failed"})["state"], "succeeded")
         self.assertIsNone(manager.get(self.project, job["id"])["result_path"])
         self.assertEqual(provider.calls, 2)
+
+    def test_explicit_retry_keeps_original_budget_group_instead_of_resetting_allowance(self):
+        manager, provider = self.manager(FakeProvider(error=True))
+        first = self.wait_state(manager, manager.submit(self.project, self.request())["id"], {"failed"})
+        self.assertEqual(provider.calls, 1)
+        provider.error = False
+        second = self.wait_state(manager, manager.retry(self.project, first["id"])["id"], {"failed", "succeeded"})
+        self.assertEqual(second["state"], "failed", second)
+        self.assertEqual(second["route"]["group_id"], first["route"]["group_id"])
+        self.assertEqual(second["retry_of"], first["id"])
+        self.assertEqual(provider.calls, 1)
+        self.assertIn("预算", second["error"])
+        self.assertEqual(first["budget_summary"]["calls"], 1)
 
     def test_queue_is_bounded_pause_resume_and_running_pause_is_interrupted(self):
         manager, provider = self.manager(FakeProvider(blocked=True), max_pending=2)

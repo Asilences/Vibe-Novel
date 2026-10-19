@@ -186,17 +186,12 @@ class LocalSettingsRuntimeTests(unittest.TestCase):
                 self.assertNotIn(secret, stored + json.dumps(final) + json.dumps(manager.capabilities()))
             self.path.write_bytes(b'{"secret-malicious-field":1,"secret-malicious-field":2}')
             self.assertFalse(manager.capabilities()["api"]["available"])
-            job = manager.submit(project, {"kind": "expand_outline", "provider": "api", "document_path": document["path"],
-                                           "document_hash": document["hash"]})
-            until = time.monotonic() + 5
-            while time.monotonic() < until:
-                final = manager.get(project, job["id"])
-                if final["state"] == "failed":
-                    break
-                time.sleep(.01)
-            self.assertEqual(final["state"], "failed")
+            # Frozen routing now validates before accepting a queued request.
+            with self.assertRaises(SettingsError) as caught:
+                manager.submit(project, {"kind": "expand_outline", "provider": "api", "document_path": document["path"],
+                                         "document_hash": document["hash"]})
             self.assertEqual(len(server.received), 2)
-            self.assertNotIn("secret-malicious-field", json.dumps(final))
+            self.assertNotIn("secret-malicious-field", str(caught.exception))
 
 
 if __name__ == "__main__":

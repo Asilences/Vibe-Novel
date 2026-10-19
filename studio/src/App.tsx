@@ -74,12 +74,14 @@ import PlanningWorkspace from "./PlanningWorkspace";
 import AnalysisWorkspace from "./AnalysisWorkspace";
 import APISettings from "./APISettings";
 import ManuscriptWorkspace from "./ManuscriptWorkspace";
+import MultiModelWorkspace, { JobRouteDetails } from "./MultiModelWorkspace";
 
 type Area =
   | "dashboard"
   | "planning"
   | "analysis"
   | "manuscript"
+  | "models"
   | "outlines"
   | "editor"
   | "approvals"
@@ -98,6 +100,7 @@ const navItems = [
   { id: "planning", label: "创作规划", icon: Layers3 },
   { id: "analysis", label: "写作检查", icon: CheckCheck },
   { id: "manuscript", label: "已有小说修订", icon: GitCompareArrows },
+  { id: "models", label: "多模型协作", icon: Settings2 },
   { id: "outlines", label: "故事大纲", icon: ListTree },
   { id: "editor", label: "章节编辑", icon: PenLine },
   { id: "approvals", label: "作者审批", icon: ShieldCheck },
@@ -1422,6 +1425,8 @@ export default function App() {
               <span>·</span>导入内容作为参考材料
             </div>
           </div>
+        ) : area === "models" ? (
+          <MultiModelWorkspace key={project.novel_id} project={project} documents={documents} onSaved={async () => { const boot = await api<Bootstrap>("/bootstrap"); setBootstrap(boot); setToken(boot.csrf_token); await refresh(project.novel_id); }} onOpen={(path) => void openDocument(path)} onTask={(id) => { setSelectedJob(id); setArea("tasks"); void refresh(project.novel_id); }} />
         ) : area === "manuscript" ? (
           <ManuscriptWorkspace key={project.novel_id} project={project} documents={documents} jobs={jobs} providers={bootstrap?.capabilities.providers || []} onSettings={() => setShowSettings(true)} onImport={() => fileInput.current?.click()} onRefresh={() => refresh(project.novel_id)} onOpen={(path, line, expectedHash) => void openDocument(path, true, false, line, expectedHash)} onJob={(job) => { setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)]); void refresh(project.novel_id); }} />
         ) : area === "analysis" ? (
@@ -2004,6 +2009,7 @@ export default function App() {
                         </>
                       )}
                     </dl>
+                    <JobRouteDetails route={selectedTask.route} attempts={selectedTask.attempts} budget={selectedTask.budget_summary} />
                     {selectedTask.request?.instruction && (
                       <div className="job-section">
                         <h3>作者指令</h3>
@@ -2203,12 +2209,12 @@ export default function App() {
             </p>
           </div>
           <form onSubmit={(event) => void startTask(event)}>
-            <div className="api-fixed-provider"><span><Settings2 size={13} />API 生成</span><button type="button" onClick={() => setShowSettings(true)}>模型与密钥设置</button></div>
+            <div className="api-fixed-provider"><span><Settings2 size={13} />API 生成</span><button type="button" onClick={() => setShowSettings(true)}>单 API 设置</button><button type="button" onClick={() => setArea("models")}>多模型与角色</button></div>
             {bootstrap && !selectedProvider?.available && <p className="field-hint" role="status">API 尚未配置。请打开模型与密钥设置，选择模型并保存配置。</p>}
             <label className="field-label">本次任务</label>
             <div className="task-options">
               {Object.entries(kindLabels)
-                .filter(([id]) => id !== "build_blueprint")
+                .filter(([id]) => ["expand_outline", "draft", "review", "rewrite"].includes(id))
                 .map(([id, label]) => (
                   <button
                     key={id}
@@ -2739,7 +2745,7 @@ export default function App() {
           </form>
         </Modal>
       )}
-      {showSettings && <APISettings onClose={() => setShowSettings(false)} onSaved={async () => { const boot = await api<Bootstrap>("/bootstrap"); setBootstrap(boot); setToken(boot.csrf_token); }} />}
+      {showSettings && <APISettings onClose={() => setShowSettings(false)} onModels={() => { setShowSettings(false); setArea("models"); }} onSaved={async () => { const boot = await api<Bootstrap>("/bootstrap"); setBootstrap(boot); setToken(boot.csrf_token); }} />}
       {exportRange && (
         <Modal
           title="导出正式作品"
