@@ -75,9 +75,14 @@ import AnalysisWorkspace from "./AnalysisWorkspace";
 import APISettings from "./APISettings";
 import ManuscriptWorkspace from "./ManuscriptWorkspace";
 import MultiModelWorkspace, { JobRouteDetails } from "./MultiModelWorkspace";
+import CreationWorkspace from "./CreationWorkspace";
 
 type Area =
   | "dashboard"
+  | "creation"
+  | "characters"
+  | "timeline"
+  | "style"
   | "planning"
   | "analysis"
   | "manuscript"
@@ -96,22 +101,27 @@ type ProposalDraft = {
   impact: string;
 };
 const navItems = [
-  { id: "dashboard", label: "作品总览", icon: LayoutDashboard },
-  { id: "planning", label: "创作规划", icon: Layers3 },
-  { id: "analysis", label: "写作检查", icon: CheckCheck },
-  { id: "manuscript", label: "已有小说修订", icon: GitCompareArrows },
-  { id: "models", label: "多模型协作", icon: Settings2 },
-  { id: "outlines", label: "故事大纲", icon: ListTree },
-  { id: "editor", label: "章节编辑", icon: PenLine },
-  { id: "approvals", label: "作者审批", icon: ShieldCheck },
-  { id: "memory", label: "故事记忆", icon: Library },
-  { id: "tasks", label: "任务记录", icon: Activity },
+  { id: "dashboard", label: "创作总览", icon: LayoutDashboard, group: "" },
+  { id: "creation", label: "创意与定位", icon: Sparkles, group: "故事设计" },
+  { id: "planning", label: "大纲与卷章", icon: ListTree, group: "故事设计" },
+  { id: "characters", label: "人物与世界", icon: Library, group: "故事设计" },
+  { id: "timeline", label: "时间线与伏笔", icon: Layers3, group: "故事设计" },
+  { id: "style", label: "写作风格", icon: Feather, group: "故事设计" },
+  { id: "editor", label: "章节写作", icon: PenLine, group: "写作校订" },
+  { id: "analysis", label: "审稿与检查", icon: CheckCheck, group: "写作校订" },
+  { id: "manuscript", label: "已有小说修订", icon: GitCompareArrows, group: "写作校订" },
+  { id: "approvals", label: "待审变更", icon: ShieldCheck, group: "作者决定" },
+  { id: "models", label: "模型与角色", icon: Settings2, group: "辅助工具" },
+  { id: "outlines", label: "大纲文稿", icon: FileText, group: "辅助工具" },
+  { id: "memory", label: "正式记忆与资料", icon: FolderOpen, group: "辅助工具" },
+  { id: "tasks", label: "任务记录", icon: Activity, group: "辅助工具" },
 ] as const;
 const genreLabels: Record<string, string> = {
   football: "足球竞技",
   adventure: "冒险探索",
   campus: "校园青春",
   alternate_history: "架空历史",
+  general: "通用创作（无专用题材检查）",
 };
 const readonlyPath = (path: string) =>
   /^(chapters|memory|bible|outlines\/approved)\//.test(path);
@@ -128,6 +138,8 @@ export default function App() {
   const [project, setProject] = useState<Project | null>(null);
   const [area, setArea] = useState<Area>("dashboard");
   const [planningPath, setPlanningPath] = useState("");
+  const [planningSource, setPlanningSource] = useState("");
+  const [childDirty, setChildDirty] = useState(false);
   const [documents, setDocuments] = useState<DocumentItem[]>([]);
   const [approvals, setApprovals] = useState<Approval[]>([]);
   const [jobs, setJobs] = useState<Job[]>([]);
@@ -196,12 +208,18 @@ export default function App() {
   );
   const allowLeave = useCallback(
     () =>
-      !dirty ||
+      (!dirty && !childDirty) ||
       window.confirm(
-        "当前文稿有未保存的修改。离开会放弃这些修改，仍要继续吗？",
+        "当前页面有未保存的修改。离开可能放弃这些修改，仍要继续吗？",
       ),
-    [dirty],
+    [dirty, childDirty],
   );
+  function navigate(next: Area): boolean {
+    if (next === area) return true;
+    if (!allowLeave()) return false;
+    setArea(next);
+    return true;
+  }
 
   const refresh = useCallback(async (id: string) => {
     const base = projectUrl(id);
@@ -273,14 +291,14 @@ export default function App() {
   }, [showHistory, project, doc, versionId, versions, notify]);
   useEffect(() => {
     const beforeUnload = (event: BeforeUnloadEvent) => {
-      if (dirty) {
+      if (dirty || childDirty) {
         event.preventDefault();
         event.returnValue = "";
       }
     };
     window.addEventListener("beforeunload", beforeUnload);
     return () => window.removeEventListener("beforeunload", beforeUnload);
-  }, [dirty]);
+  }, [dirty, childDirty]);
   useEffect(() => {
     if (!project) return;
     const timer = setInterval(async () => {
@@ -318,6 +336,7 @@ export default function App() {
     setImports([]);
     setArea("dashboard");
     setPlanningPath("");
+    setPlanningSource("");
     setRepairJob(null);
     setCandidate("");
     const selected = projects.find((item) => item.novel_id === id) || null;
@@ -351,6 +370,9 @@ export default function App() {
     expectedHash?: string,
   ) {
     if (!project || ((path !== doc?.path || discard) && !allowLeave())) return;
+    if (path === "outlines/source/creative-brief.json" || path === "reviews/creation-selection.json") {
+      setArea("creation"); return;
+    }
     if (path === doc?.path && dirty && !discard) return;
     if (
       !expectedHash && /^outlines\/(approved|proposals)\/blueprint(?:-[a-z0-9]+)?\.json$/.test(
@@ -454,8 +476,8 @@ export default function App() {
     event.preventDefault();
     const fields = new FormData(event.currentTarget);
     const input = {
-      novel_id: String(fields.get("id")).trim(),
-      title: String(fields.get("title")).trim(),
+      novel_id: String(fields.get("id") || "").trim() || undefined,
+      title: String(fields.get("title") || "").trim() || "未命名作品",
       genre: String(fields.get("genre")),
     };
     if (!allowLeave()) return;
@@ -480,12 +502,17 @@ export default function App() {
         return;
       }
       currentProject.current = created.novel_id;
+      docRequest.current += 1;
       setProject(created);
       setDoc(null);
       setSource("");
-      setArea("dashboard");
+      setDocuments([]); setJobs([]); setApprovals([]); setImports([]);
+      setRepairJob(null); setCandidate("");
+      const start = String(fields.get("start") || "creation");
+      setArea(start === "outline" ? "planning" : start === "manuscript" ? "manuscript" : "creation");
+      setPlanningPath(""); setPlanningSource("");
       await refresh(created.novel_id);
-      notify("作品已创建。先导入或编写故事大纲。");
+      notify(start === "creation" ? "作品已创建。写下一点故事想法，即可开始构思。" : "作品已创建。可以导入已有材料继续。");
     });
   }
   function newDocument() {
@@ -494,6 +521,11 @@ export default function App() {
     );
     setNewDocContent("");
     setShowNewDoc(true);
+  }
+  function closeNewDocument() {
+    if (busy === "new-document") return;
+    if (newDocContent.trim() && !window.confirm("新文稿的内容尚未保存，确定放弃并关闭吗？")) return;
+    setShowNewDoc(false);
   }
   function adaptImported() {
     if (!doc) return;
@@ -526,7 +558,7 @@ export default function App() {
       setPreview(false);
       setArea(isOutline(result.path) ? "outlines" : "editor");
       await refresh(project.novel_id);
-      notify("已创建空白文稿");
+      notify(result.content.trim() ? "内容已保存为独立工作文稿。" : "已创建空白文稿");
     });
   }
   async function importFile(file: File) {
@@ -910,10 +942,12 @@ export default function App() {
   );
   const editorArea =
     area === "outlines" || area === "editor" || area === "memory";
+  const planningArea = ["planning", "characters", "timeline", "style"].includes(area);
+  const showRight = rightOpen && editorArea;
 
   return (
     <div
-      className={`app ${!leftOpen ? "left-hidden" : ""} ${!rightOpen ? "right-hidden" : ""}`}
+      className={`app ${!leftOpen ? "left-hidden" : ""} ${!showRight ? "right-hidden" : ""}`}
     >
       <a className="skip-link" href="#workspace">
         跳到工作区
@@ -973,17 +1007,20 @@ export default function App() {
       </header>
       <aside className="sidebar" aria-label="工作区导航">
         <div className="sidebar-top">
-          <span>工作空间</span>
+          <span>这部小说的创作过程</span>
           <IconButton label="收起导航" onClick={() => setLeftOpen(false)}>
             <PanelLeftClose size={16} />
           </IconButton>
         </div>
         <nav>
-          {navItems.map(({ id, label, icon: Icon }) => (
+          {navItems.map(({ id, label, icon: Icon, group }, index) => (
+            <div key={id}>
+            {group && (index === 0 || navItems[index - 1].group !== group) && <div className="nav-group-label">{group}</div>}
             <button
               className={`nav-item ${area === id ? "selected" : ""}`}
               key={id}
-              onClick={() => setArea(id)}
+              onClick={() => navigate(id)}
+              aria-current={area === id ? "page" : undefined}
             >
               <Icon size={18} strokeWidth={1.7} />
               <span>{label}</span>
@@ -994,6 +1031,7 @@ export default function App() {
               ) : null}
               {area === id && <span className="nav-active-dot" />}
             </button>
+            </div>
           ))}
         </nav>
         <div className="sidebar-rule" />
@@ -1155,7 +1193,7 @@ export default function App() {
           </div>
           <div className="workspace-actions">
             {busy && <LoaderCircle className="spin" size={14} />}
-            {!rightOpen && (
+            {editorArea && !rightOpen && (
               <IconButton
                 label="展开创作助手"
                 onClick={() => setRightOpen(true)}
@@ -1266,6 +1304,11 @@ export default function App() {
                 <BookOpen size={29} strokeWidth={1.1} />
               </div>
             </div>
+            <section className="creation-starts" aria-label="选择创作起点">
+              <button onClick={() => navigate("creation")}><Sparkles size={20} /><strong>从零构思</strong><span>写下故事种子，生成初版总纲</span><ArrowRight size={16} /></button>
+              <button onClick={() => navigate("planning")}><ListTree size={20} /><strong>已有大纲</strong><span>导入或粘贴，展开卷章与设定</span><ArrowRight size={16} /></button>
+              <button onClick={() => navigate("manuscript")}><GitCompareArrows size={20} /><strong>已有正文</strong><span>校正分章，检查与修订已有小说</span><ArrowRight size={16} /></button>
+            </section>
             <div className="overview-stats">
               {[
                 {
@@ -1425,13 +1468,20 @@ export default function App() {
               <span>·</span>导入内容作为参考材料
             </div>
           </div>
+        ) : area === "creation" ? (
+          <CreationWorkspace key={project.novel_id} project={project} documents={documents} jobs={jobs}
+            onChanged={() => refresh(project.novel_id)} onDirtyChange={setChildDirty}
+            onSettings={() => setShowSettings(true)}
+            onOpenDocument={(path) => void openDocument(path)}
+            onPlanning={(path) => { if (!allowLeave()) return; setPlanningSource(path); setPlanningPath(""); setArea("planning"); }}
+            onJob={(job) => { setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)]); void refresh(project.novel_id); }} />
         ) : area === "models" ? (
           <MultiModelWorkspace key={project.novel_id} project={project} documents={documents} onSaved={async () => { const boot = await api<Bootstrap>("/bootstrap"); setBootstrap(boot); setToken(boot.csrf_token); await refresh(project.novel_id); }} onOpen={(path) => void openDocument(path)} onTask={(id) => { setSelectedJob(id); setArea("tasks"); void refresh(project.novel_id); }} />
         ) : area === "manuscript" ? (
           <ManuscriptWorkspace key={project.novel_id} project={project} documents={documents} jobs={jobs} providers={bootstrap?.capabilities.providers || []} onSettings={() => setShowSettings(true)} onImport={() => fileInput.current?.click()} onRefresh={() => refresh(project.novel_id)} onOpen={(path, line, expectedHash) => void openDocument(path, true, false, line, expectedHash)} onJob={(job) => { setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)]); void refresh(project.novel_id); }} />
         ) : area === "analysis" ? (
           <AnalysisWorkspace key={project.novel_id} project={project} documents={documents} approvals={approvals} currentDocument={doc || undefined} unsavedPath={dirty ? doc?.path : undefined} onOpen={(path, line, expectedHash) => void openDocument(path, true, false, line, expectedHash)} onRefresh={() => refresh(project.novel_id)} />
-        ) : area === "planning" ? (
+        ) : planningArea ? (
           <PlanningWorkspace
             key={project.novel_id}
             project={project}
@@ -1441,6 +1491,11 @@ export default function App() {
             jobs={jobs}
             approvals={approvals}
             initialPath={planningPath}
+            initialSourcePath={planningSource}
+            initialTab={area === "characters" ? "characters" : area === "timeline" ? "timeline" : area === "style" ? "style" : "overview"}
+            onDirtyChange={setChildDirty}
+            onImport={() => fileInput.current?.click()}
+            onPaste={() => { if (!allowLeave()) return; setArea("outlines"); setNewPath("outlines/proposals/book.md"); setNewDocContent(""); setShowNewDoc(true); }}
             onSource={(path, line) =>
               void openDocument(path, true, false, line)
             }
@@ -2157,10 +2212,10 @@ export default function App() {
                         <button
                           className="button secondary small"
                           disabled={!!busy}
-                          onClick={() => void jobAction(selectedTask, "retry")}
+                          onClick={() => selectedTask.kind === "generate_story_outline" ? navigate("creation") : void jobAction(selectedTask, "retry")}
                         >
                           <RotateCcw size={14} />
-                          重试任务
+                          {selectedTask.kind === "generate_story_outline" ? "返回构思，重新预览" : "重试任务"}
                         </button>
                       )}
                     </div>
@@ -2172,7 +2227,7 @@ export default function App() {
         )}
       </main>
 
-      {rightOpen && (
+      {showRight && (
         <button
           className="agent-scrim"
           aria-label="关闭创作助手"
@@ -2209,7 +2264,7 @@ export default function App() {
             </p>
           </div>
           <form onSubmit={(event) => void startTask(event)}>
-            <div className="api-fixed-provider"><span><Settings2 size={13} />API 生成</span><button type="button" onClick={() => setShowSettings(true)}>单 API 设置</button><button type="button" onClick={() => setArea("models")}>多模型与角色</button></div>
+            <div className="api-fixed-provider"><span><Settings2 size={13} />API 生成</span><button type="button" onClick={() => setShowSettings(true)}>单 API 设置</button><button type="button" onClick={() => navigate("models")}>多模型与角色</button></div>
             {bootstrap && !selectedProvider?.available && <p className="field-hint" role="status">API 尚未配置。请打开模型与密钥设置，选择模型并保存配置。</p>}
             <label className="field-label">本次任务</label>
             <div className="task-options">
@@ -2339,7 +2394,7 @@ export default function App() {
             </p>
           </div>
           {runningCount > 0 && (
-            <button className="active-jobs" onClick={() => setArea("tasks")}>
+            <button className="active-jobs" onClick={() => navigate("tasks")}>
               <span className="connection-dot orange-dot" />
               {runningCount} 项任务等待处理
               <ArrowUpRight size={14} />
@@ -2381,9 +2436,9 @@ export default function App() {
       )}
       {showCreate && (
         <Modal
-          title="创建一部新作品"
+          title="开始新故事"
           subtitle="给故事一个名字，其他的可以慢慢写。"
-          onClose={() => setShowCreate(false)}
+          onClose={() => { if (busy !== "create") setShowCreate(false); }}
         >
           <form
             onSubmit={(event) => void createProject(event)}
@@ -2394,34 +2449,35 @@ export default function App() {
               <input
                 name="title"
                 placeholder="你的故事叫什么名字？"
-                required
                 maxLength={100}
               />
             </label>
-            <label>
+            <fieldset className="creation-start-choice"><legend>你现在有什么？</legend>
+              <label><input type="radio" name="start" value="creation" defaultChecked />从零构思<span>只有灵感，还没有大纲</span></label>
+              <label><input type="radio" name="start" value="outline" />已有大纲<span>导入或粘贴，继续规划</span></label>
+              <label><input type="radio" name="start" value="manuscript" />已有正文<span>分章、检查和修订</span></label>
+            </fieldset>
+            <details><summary>高级选项 · 自定义本地作品标识</summary><label>
               作品标识<span className="label-optional">用于本地文件夹</span>
               <input
                 name="id"
                 placeholder="my-first-novel"
                 pattern="[a-z][a-z0-9_-]{0,63}"
                 title="小写字母开头，使用小写字母、数字、下划线或短横线，最多 64 个字符"
-                required
                 maxLength={64}
               />
               <small>小写字母开头，可使用数字、下划线和短横线。</small>
-            </label>
+            </label></details>
             <label>
-              主要题材
-              <select name="genre" required defaultValue="">
-                <option value="" disabled>
-                  选择一个题材模块
-                </option>
+              创作规则模块
+              <select name="genre" required defaultValue="general">
                 {Object.entries(genreLabels).map(([id, label]) => (
                   <option value={id} key={id}>
                     {label}
                   </option>
                 ))}
               </select>
+              <small>阅读分类和内容标签可在构思页选择。通用模块尚无专用题材检查。</small>
             </label>
             <div className="form-note">
               <LockKeyhole size={14} />
@@ -2431,7 +2487,7 @@ export default function App() {
               <button
                 type="button"
                 className="button secondary"
-                onClick={() => setShowCreate(false)}
+                onClick={() => setShowCreate(false)} disabled={busy === "create"}
               >
                 暂不创建
               </button>
@@ -2454,7 +2510,7 @@ export default function App() {
         <Modal
           title={area === "outlines" ? "新建故事大纲" : "新建工作文稿"}
           subtitle="工作文件可以直接编辑，正式文件通过提案更新。"
-          onClose={() => setShowNewDoc(false)}
+          onClose={closeNewDocument}
         >
           <form
             className="modal-form"
@@ -2471,11 +2527,12 @@ export default function App() {
               />
               <small>例如 drafts/ch001.md 或 outlines/proposals/ch001.md</small>
             </label>
+            <label>正文或大纲内容<span className="label-optional">可留空后再写</span><textarea rows={9} maxLength={500000} value={newDocContent} onChange={(event) => setNewDocContent(event.target.value)} placeholder="在这里粘贴已有大纲，或先写下你的想法。" /></label>
             <div className="modal-footer">
               <button
                 type="button"
                 className="button secondary"
-                onClick={() => setShowNewDoc(false)}
+                onClick={closeNewDocument}
               >
                 取消
               </button>
@@ -2485,7 +2542,7 @@ export default function App() {
                 disabled={!!busy}
               >
                 <Plus size={15} />
-                创建空白文稿
+                {newDocContent.trim() ? "保存为工作文稿" : "创建空白文稿"}
               </button>
             </div>
           </form>
@@ -2745,7 +2802,7 @@ export default function App() {
           </form>
         </Modal>
       )}
-      {showSettings && <APISettings onClose={() => setShowSettings(false)} onModels={() => { setShowSettings(false); setArea("models"); }} onSaved={async () => { const boot = await api<Bootstrap>("/bootstrap"); setBootstrap(boot); setToken(boot.csrf_token); }} />}
+      {showSettings && <APISettings onClose={() => setShowSettings(false)} onModels={() => { if (navigate("models")) setShowSettings(false); }} onSaved={async () => { const boot = await api<Bootstrap>("/bootstrap"); setBootstrap(boot); setToken(boot.csrf_token); }} />}
       {exportRange && (
         <Modal
           title="导出正式作品"
