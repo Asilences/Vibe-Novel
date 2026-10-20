@@ -1,5 +1,5 @@
 """Offline reference retrieval API, under Studio's existing CSRF boundary."""
-from typing import Literal
+from typing import Literal, Optional
 
 from fastapi import FastAPI
 from pydantic import BaseModel, ConfigDict, Field, StrictStr
@@ -25,7 +25,7 @@ class IndexBuild(IndexPreview):
 
 class RetrievalSearch(RetrievalInput):
     query: StrictStr = Field(min_length=1, max_length=200)
-    layers: list[Layer] | None = None
+    layers: Optional[list[Layer]] = None
     limit: int = Field(default=12, ge=1, le=30)
     semantic: bool = True
     relationships: bool = True

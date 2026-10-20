@@ -7,7 +7,7 @@ import math
 import re
 import threading
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Optional
 
 from fastapi import FastAPI, Query
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr
@@ -476,7 +476,7 @@ class Source(StudyInput):
     book_id: StrictStr = Field(min_length=32, max_length=32)
     edition_id: StrictStr = Field(min_length=32, max_length=32)
     chapter_ids: list[StrictStr] = Field(default_factory=list, max_length=20000)
-    ranges: list[SourceRange] | None = Field(default=None, max_length=100)
+    ranges: Optional[list[SourceRange]] = Field(default=None, max_length=100)
 
 
 class StudyRequest(StudyInput):
