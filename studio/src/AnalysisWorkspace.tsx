@@ -5,8 +5,9 @@ import { api, download, leaf, projectUrl } from "./api";
 import type { AnalysisIssue, AnalysisMetrics, AnalysisReport, AnalysisSearch, AnalysisVerification, Approval, ChapterBrief, DocumentItem, Project, SemanticStatus, StyleBaseline } from "./api";
 import { Empty } from "./ui";
 import AnalysisToolkitWorkspace from "./AnalysisToolkitWorkspace";
+import { selectionChanged } from "./pendingEdits";
 
-type Props = { project: Project; documents: DocumentItem[]; approvals: Approval[]; currentDocument?: DocumentItem; unsavedPath?: string; onOpen: (path: string, line?: number, expectedHash?: string) => void; onRefresh: () => Promise<void> };
+type Props = { project: Project; documents: DocumentItem[]; approvals: Approval[]; currentDocument?: DocumentItem; unsavedPath?: string; onOpen: (path: string, line?: number, expectedHash?: string) => void; onRefresh: () => Promise<void>; onDirtyChange?: (dirty: boolean) => void };
 type Tab = "brief" | "review" | "baseline" | "search" | "toolkit" | "structure";
 const tabs: { id: Tab; label: string; icon: typeof BookOpen }[] = [{ id: "brief", label: "写前包", icon: ClipboardList }, { id: "review", label: "本地审稿", icon: ShieldCheck }, { id: "baseline", label: "固定样章", icon: SlidersHorizontal }, { id: "search", label: "历史检索", icon: FileSearch }, { id: "toolkit", label: "用词与档案", icon: BookOpen }, { id: "structure", label: "跨章线索", icon: History }];
 const metricLabels: Record<string, string> = { characters: "字符数", sentences: "句段数", paragraphs: "段落数", mean_sentence_characters: "平均句段字符", mean_paragraph_characters: "平均段落字符", sentence_length_variation: "句长变异系数", short_sentences_percent: "短句占比（%）", long_sentence_count: "长句段数", dialogue_marks_per_1000: "每千字符引号数", simile_terms_per_1000: "每千字符比拟词数" };
@@ -51,13 +52,14 @@ function BaselineComparison({ value, documents, onOpen }: { value: AnalysisRepor
   </details>;
 }
 
-export default function AnalysisWorkspace({ project, documents, approvals, currentDocument, unsavedPath, onOpen, onRefresh }: Props) {
+export default function AnalysisWorkspace({ project, documents, approvals, currentDocument, unsavedPath, onOpen, onRefresh, onDirtyChange }: Props) {
   const base = `${projectUrl(project.novel_id)}/analysis`;
   const [tab, setTab] = useState<Tab>("brief");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [baseline, setBaseline] = useState<StyleBaseline | null>(null);
   const [samplePaths, setSamplePaths] = useState<string[]>([]);
+  const [toolkitDirty, setToolkitDirty] = useState(false);
   const [baselineBusy, setBaselineBusy] = useState(false);
   const [planPath, setPlanPath] = useState("");
   const [mode, setMode] = useState<"compact" | "full">("compact");
@@ -96,6 +98,17 @@ export default function AnalysisWorkspace({ project, documents, approvals, curre
   const searchStale = !!search && ((searchSignature !== historySignature) || (search.canonical_revision !== undefined && project.canonical_revision !== undefined && search.canonical_revision !== project.canonical_revision) || search.results.some((item) => documents.find((document) => document.path === item.path)?.hash !== item.hash));
   const briefStale = !!brief && Object.entries(brief.sources).some(([path, hash]) => documents.find((item) => item.path === path)?.hash !== hash);
   const sourceStale = (path: string, hash: string) => documents.find((item) => item.path === path)?.hash !== hash;
+  const baselineDirty = !!baseline && selectionChanged(samplePaths, baseline.samples.map((item) => item.path));
+  const dirty = toolkitDirty || baselineDirty;
+  const dirtyCallback = useRef(onDirtyChange); dirtyCallback.current = onDirtyChange;
+  useEffect(() => { dirtyCallback.current?.(dirty); }, [dirty]);
+  useEffect(() => () => dirtyCallback.current?.(false), []);
+
+  function chooseTab(next: Tab) {
+    if (next === tab) return;
+    if (toolkitDirty && !window.confirm("检查配置尚未保存。切换工具会放弃这份修改，仍要继续吗？")) return;
+    setToolkitDirty(false); setTab(next); setError(""); setNotice("");
+  }
 
   useEffect(() => {
     alive.current = true;
@@ -239,11 +252,11 @@ export default function AnalysisWorkspace({ project, documents, approvals, curre
   return <div className="analysis-workspace scroll-area">
     <div className="page-heading compact-heading"><div><div className="eyebrow">A CLOSER LOOK AT YOUR WORDS</div><h1>写作检查</h1><p>准备写前材料，核对已保存文稿，保留每一处证据。</p></div><button type="button" className="button secondary small" onClick={() => void refreshView()} disabled={refreshBusy || baselineBusy || reportBusy || !!markBusy}><RefreshCw size={14} className={refreshBusy ? "spin" : ""} />刷新状态</button></div>
     <div className="analysis-local-note"><CheckCheck size={15} />本工作区使用本地资料；语义检索在本机运行，不调用生成 API。检查结果供作者判断。</div>
-    <div className="analysis-tabs" role="tablist" aria-label="写作检查工具">{tabs.map(({ id, label, icon: Icon }) => <button type="button" key={id} id={`analysis-tab-${id}`} aria-controls={`analysis-panel-${id}`} role="tab" aria-selected={tab === id} className={tab === id ? "selected" : ""} onClick={() => { setTab(id); setError(""); setNotice(""); }}><Icon size={16} />{label}</button>)}</div>
+    <div className="analysis-tabs" role="tablist" aria-label="写作检查工具">{tabs.map(({ id, label, icon: Icon }) => <button type="button" key={id} id={`analysis-tab-${id}`} aria-controls={`analysis-panel-${id}`} role="tab" aria-selected={tab === id} className={tab === id ? "selected" : ""} onClick={() => chooseTab(id)}><Icon size={16} />{label}</button>)}</div>
     {error && <div className="analysis-error" role="alert"><CircleAlert size={16} /><span>{error}</span><button type="button" onClick={() => setError("")} aria-label="关闭检查错误">×</button></div>}
     {notice && <p className="analysis-success" role="status">{notice}</p>}
     <section className="analysis-panel" role="tabpanel" id={`analysis-panel-${tab}`} aria-labelledby={`analysis-tab-${tab}`}>
-      {(tab === "toolkit" || tab === "structure") && <AnalysisToolkitWorkspace key={`${project.novel_id}-${tab}`} project={project} documents={documents} onOpen={onOpen} onRefresh={refreshView} view={tab} />}
+      {(tab === "toolkit" || tab === "structure") && <AnalysisToolkitWorkspace key={`${project.novel_id}-${tab}`} project={project} documents={documents} onOpen={onOpen} onRefresh={refreshView} onDirtyChange={setToolkitDirty} view={tab} />}
       {tab === "brief" && <>
         <div className="analysis-section-heading"><div><h2>从已批准计划开始</h2><p>汇集当前章计划、承接状态、相关规划和检索证据，列出缺失及省略的材料。实际起草会按助手中选定的模式重建最新包。</p></div><ClipboardList size={21} /></div>
         <div className="analysis-controls"><label className="analysis-field grow">已批准并应用的章计划<select value={planPath} onChange={(event) => { setPlanPath(event.target.value); requests.current.brief += 1; setBrief(null); setBriefBusy(false); }}><option value="">明确选择一份章计划</option>{plans.map((item) => <option key={item.path} value={item.path}>{item.path}</option>)}</select></label><label className="analysis-field">材料范围<select value={mode} onChange={(event) => { setMode(event.target.value as "compact" | "full"); requests.current.brief += 1; setBrief(null); setBriefBusy(false); }}><option value="compact">精简写前包</option><option value="full">完整写前包</option></select></label><button type="button" className="button primary small" disabled={!selectedPlan || briefBusy} onClick={() => void buildBrief()}>{briefBusy ? <LoaderCircle className="spin" size={15} /> : <ClipboardList size={15} />}整理写前包</button></div>
@@ -282,7 +295,7 @@ export default function AnalysisWorkspace({ project, documents, approvals, curre
         <div className="analysis-section-heading"><div><h2>由你选定文风参照</h2><p>明确选择章节或草稿作为样章；系统不会自动替换，文件变化后需再次保存。</p></div><SlidersHorizontal size={21} /></div>
         {baseline?.configured ? <><div className="analysis-result-heading"><span className="tag">{baselineStale ? "样章版本已变化" : "固定样章已配置"}</span><span>{baseline.samples.length} 份样章 · {baseline.hash?.slice(0, 12)}</span></div>{baselineStale && <Warning>至少一份样章已变更或缺失。原基线保留；下方勾选后点击保存，才会按当前版本更新。</Warning>}<Metrics value={baseline.metrics} /></> : <Warning>尚未选定固定样章。本地审稿可以继续，文风对照暂不执行。</Warning>}
         <div className="analysis-samples">{samples.length ? samples.map((item) => { const fixed = baseline?.samples.find((entry) => entry.path === item.path); const changed = !!fixed && fixed.hash !== documents.find((document) => document.path === item.path)?.hash; return <label key={item.path} className="analysis-sample"><input type="checkbox" checked={samplePaths.includes(item.path)} disabled={baselineBusy || (!samplePaths.includes(item.path) && samplePaths.length >= 10)} onChange={(event) => setSamplePaths((items) => event.target.checked ? [...items, item.path] : items.filter((path) => path !== item.path))} /><span><strong>{item.path}</strong><small>{item.kind === "missing" ? "文件已缺失，请取消选择" : fixed ? changed ? "当前内容已变化，保存后才会更新基线" : "与保存的样章版本一致" : "尚未设为样章"}{item.path === unsavedPath ? " · 有未保存修改" : ""}</small></span>{fixed && <code>{fixed.hash.slice(0, 10)}</code>}</label>; }) : <Empty compact title="还没有可选样章" description="先保存一份草稿或正式章节，再由你明确选定。" />}</div>
-        <div className="analysis-save-row"><span>{samplePaths.length ? `已选择 ${samplePaths.length} / 10 份；保存时绑定当前文件版本` : "请明确选择 1–10 份样章"}</span><button type="button" className="button primary small" disabled={!baseline || baselineBusy || refreshBusy || !samplePaths.length || samplePaths.length > 10 || samplePaths.includes(unsavedPath || "")} onClick={() => void saveBaseline()}>{baselineBusy ? <LoaderCircle size={15} className="spin" /> : <Save size={15} />}保存样章选择</button></div><Limits items={baseline?.limitations} />
+        <div className="analysis-save-row"><span>{baselineDirty ? "样章选择有未保存修改 · " : ""}{samplePaths.length ? `已选择 ${samplePaths.length} / 10 份；保存时绑定当前文件版本` : "请明确选择 1–10 份样章"}</span><button type="button" className="button primary small" disabled={!baseline || baselineBusy || refreshBusy || !samplePaths.length || samplePaths.length > 10 || samplePaths.includes(unsavedPath || "")} onClick={() => void saveBaseline()}>{baselineBusy ? <LoaderCircle size={15} className="spin" /> : <Save size={15} />}保存样章选择</button></div><Limits items={baseline?.limitations} />
       </>}
       {tab === "search" && <>
         <div className="analysis-section-heading"><div><h2>检索正式章节</h2><p>查找历史原句，保留文件版本和行号。本地语义检索需先准备模型与运行依赖。</p></div><FileSearch size={21} /></div>

@@ -395,7 +395,7 @@ export default function App() {
     line?: number,
     expectedHash?: string,
   ): Promise<boolean> {
-    if (!project || ((path !== doc?.path || discard) && !allowLeave())) return false;
+    if (!project || ((path !== doc?.path || discard || childDirty) && !allowLeave())) return false;
     if (path === "outlines/source/creative-brief.json" || path === "reviews/creation-selection.json") {
       setArea("creation"); return true;
     }
@@ -1532,11 +1532,11 @@ export default function App() {
             onPlanning={(path) => { if (!allowLeave()) return; setPlanningForm(null); setPlanningSource(path); setPlanningPath(""); setArea("planning"); }}
             onJob={(job) => { setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)]); void refresh(project.novel_id); }} />
         ) : area === "models" ? (
-          <MultiModelWorkspace key={project.novel_id} project={project} documents={documents} onSaved={async () => { const boot = await api<Bootstrap>("/bootstrap"); setBootstrap(boot); setToken(boot.csrf_token); await refresh(project.novel_id); }} onOpen={(path) => void openDocument(path)} onTask={(id) => { setSelectedJob(id); setArea("tasks"); void refresh(project.novel_id); }} />
+          <MultiModelWorkspace key={project.novel_id} project={project} documents={documents} onDirtyChange={setChildDirty} onSaved={async () => { const boot = await api<Bootstrap>("/bootstrap"); setBootstrap(boot); setToken(boot.csrf_token); await refresh(project.novel_id); }} onOpen={(path) => void openDocument(path)} onTask={(id) => { if (!navigate("tasks")) return; setSelectedJob(id); void refresh(project.novel_id); }} />
         ) : area === "manuscript" ? (
           <ManuscriptWorkspace key={project.novel_id} project={project} documents={documents} jobs={jobs} providers={bootstrap?.capabilities.providers || []} onSettings={() => setShowSettings(true)} onImport={() => fileInput.current?.click()} onRefresh={() => refresh(project.novel_id)} onOpen={(path, line, expectedHash) => void openDocument(path, true, false, line, expectedHash)} onJob={(job) => { setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)]); void refresh(project.novel_id); }} />
         ) : area === "analysis" ? (
-          <AnalysisWorkspace key={project.novel_id} project={project} documents={documents} approvals={approvals} currentDocument={doc || undefined} unsavedPath={dirty ? doc?.path : undefined} onOpen={(path, line, expectedHash) => void openDocument(path, true, false, line, expectedHash)} onRefresh={() => refresh(project.novel_id)} />
+          <AnalysisWorkspace key={project.novel_id} project={project} documents={documents} approvals={approvals} currentDocument={doc || undefined} unsavedPath={dirty ? doc?.path : undefined} onDirtyChange={setChildDirty} onOpen={(path, line, expectedHash) => void openDocument(path, true, false, line, expectedHash)} onRefresh={() => refresh(project.novel_id)} />
         ) : planningArea ? (
           <PlanningWorkspace
             key={project.novel_id}

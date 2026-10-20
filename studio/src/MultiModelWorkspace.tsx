@@ -7,6 +7,7 @@ import NovelBenchWorkspace from "./NovelBenchWorkspace";
 import { reviewMatchesCandidate } from "./reviewIdentity";
 import { libraryPreviewHash, libraryTaskConfiguration } from "./libraryHelpers";
 import TaskMaterialPreview from "./TaskMaterialPreview";
+import { modelProfileChanged } from "./pendingEdits";
 
 const roles: { id: ModelRole; label: string }[] = [{ id: "planner", label: "规划" }, { id: "writer", label: "正文与编辑" }, { id: "reviewer", label: "证据审稿" }, { id: "memory", label: "候选记忆抽取" }];
 const emptyProfile = (): ModelProfile => ({ id: "", label: "", base_url: "", model: "", allow_loopback: false, roles: roles.map((item) => item.id), context_tokens: 65536, max_output_tokens: 4096, price_input_usd: null, price_output_usd: null, has_api_key: false });
@@ -30,7 +31,7 @@ export function JobRouteDetails({ route, attempts, budget }: { route?: Record<st
   return <>{route && <details className="analysis-limits model-snapshot" open><summary>本次模型与路由快照</summary><RecordSummary value={route} /><p>这里显示任务创建时保存的配置；后续设置修改不会改写本次快照。</p></details>}{attempts && attempts.length > 0 && <details className="analysis-limits model-snapshot"><summary>调用尝试（{attempts.length}）</summary><pre>{JSON.stringify(attempts, null, 2)}</pre></details>}{budget && <details className="analysis-limits model-snapshot" open><summary>预算与费用记录</summary><RecordSummary value={budget} /><p>以上费用按你填写的报价及服务端用量估算，并非服务商结算账单。缺少报价或用量时保留未知；本机预算不能保证最终账单上限。</p></details>}</>;
 }
 
-export default function MultiModelWorkspace({ project, documents, onSaved, onOpen, onTask }: { project: Project; documents: DocumentItem[]; onSaved: () => Promise<void>; onOpen: (path: string) => void; onTask: (id: string) => void }) {
+export default function MultiModelWorkspace({ project, documents, onSaved, onOpen, onTask, onDirtyChange }: { project: Project; documents: DocumentItem[]; onSaved: () => Promise<void>; onOpen: (path: string) => void; onTask: (id: string) => void; onDirtyChange?: (dirty: boolean) => void }) {
   const taskReference = useTaskReference(project.novel_id);
   const base = projectUrl(project.novel_id);
   const [registry, setRegistry] = useState<ModelRegistry | null>(null);
@@ -67,11 +68,19 @@ export default function MultiModelWorkspace({ project, documents, onSaved, onOpe
   const policyDirty = !!routing && JSON.stringify(policy) !== JSON.stringify(routing.policy);
   const identityRef = useRef(currentIdentity); identityRef.current = currentIdentity;
   const selectedSaved = registry?.profiles.find((item) => item.id === selectedProfile);
+  const profileDirty = !!registry && modelProfileChanged(profile, selectedSaved || emptyProfile(), !!secret, clearKey);
+  const dirty = profileDirty || policyDirty;
+  const dirtyCallback = useRef(onDirtyChange); dirtyCallback.current = onDirtyChange;
+  useEffect(() => { dirtyCallback.current?.(dirty); }, [dirty]);
+  useEffect(() => () => dirtyCallback.current?.(false), []);
+  function canReplaceProfile() { return !profileDirty || window.confirm("当前模型配置或新填密钥尚未保存。切换会放弃这些修改，仍要继续吗？"); }
+  function canReload() { return !dirty || window.confirm("模型配置或作品策略有未保存修改。重新读取会放弃这些修改，仍要继续吗？"); }
   const changedEndpoint = !!selectedSaved?.has_api_key && selectedSaved.base_url !== profile.base_url.trim() && !secret.trim() && !clearKey;
   const lastReview = workflow ? [...workflow.nodes].reverse().find((node) => node.kind === "review_evidence" && node.state === "succeeded") : undefined;
   const lastWriter = workflow ? [...workflow.nodes].reverse().find((node) => ["draft", "rewrite"].includes(node.kind)) : undefined;
   const evidenceStale = !!workflow?.stale || evidenceReadStale || !!evidence && (!reviewMatchesCandidate(evidence, lastWriter) || documents.find((item) => item.path === evidence.target_path)?.hash !== evidence.target_hash || documents.find((item) => item.path === lastReview?.result_path)?.hash !== lastReview?.result_hash);
-  function chooseProfile(value?: ModelProfile) { setSelectedProfile(value?.id || ""); setProfile(value ? { ...value, roles: [...value.roles] } : emptyProfile()); setSecret(""); setClearKey(false); setNotice(""); setError(""); }
+  function resetProfile(value?: ModelProfile) { setSelectedProfile(value?.id || ""); setProfile(value ? { ...value, roles: [...value.roles] } : emptyProfile()); setSecret(""); setClearKey(false); setNotice(""); setError(""); }
+  function chooseProfile(value?: ModelProfile) { if (canReplaceProfile()) resetProfile(value); }
   async function reload() {
     const generation = ++loadGeneration.current;
     const values = await Promise.all([api<ModelRegistry>("/model-registry"), api<RoutingSettings>(`${base}/routing`), api<{ workflows: ModelWorkflow[] }>(`${base}/workflows`)]);
@@ -122,7 +131,7 @@ export default function MultiModelWorkspace({ project, documents, onSaved, onOpe
     const value = await api<ModelRegistry>("/model-registry", "PUT", { expected_hash: registry.hash, profiles });
     if (!alive.current) return;
     setRegistry(value); setSecret(""); setClearKey(false); setPreview(null);
-    if (remove) chooseProfile(); else { const saved = value.profiles.find((item) => item.id === entry.id); if (saved) chooseProfile(saved); }
+    if (remove) resetProfile(); else { const saved = value.profiles.find((item) => item.id === entry.id); if (saved) resetProfile(saved); }
     setNotice(remove ? "模型配置已移除。若仍被角色引用，请重新绑定后再开始任务。" : "本机模型配置已保存；尚未调用服务商测试连接。");
     try { await onSaved(); } catch { if (alive.current) setNotice("模型配置已保存，工作台状态尚未刷新；无需再次提交密钥。"); }
   }
@@ -149,11 +158,11 @@ export default function MultiModelWorkspace({ project, documents, onSaved, onOpe
     if (alive.current) { setWorkflow(value); setWorkflows((items) => [value, ...items.filter((item) => item.id !== value.id)]); setNotice("已按所选证据启动局部修订。生成新的正文版本后，旧审稿将失效，须重新审稿。"); }
   }
   return <div className="multi-model-workspace">
-    <header className="model-workspace-heading"><div><span className="eyebrow">由作者选择职责与模型</span><h1>多模型协作</h1><p>为规划、正文、审稿和候选记忆分别绑定 API；每个生成节点由一个模型返回候选。</p></div><button type="button" className="button secondary small" disabled={!!busy} onClick={() => void act("reload", reload)}><RefreshCw size={14} />重新读取</button></header>
+    <header className="model-workspace-heading"><div><span className="eyebrow">由作者选择职责与模型</span><h1>多模型协作</h1><p>为规划、正文、审稿和候选记忆分别绑定 API；每个生成节点由一个模型返回候选。</p></div><button type="button" className="button secondary small" disabled={!!busy} onClick={() => { if (canReload()) void act("reload", reload); }}><RefreshCw size={14} />重新读取</button></header>
     {error && <p className="inline-error" role="alert">{error}</p>}{notice && <p className="analysis-success" role="status">{notice}</p>}
     {!registry || !routing ? <div className="analysis-loading"><LoaderCircle size={20} className="spin" />读取模型与作品策略…</div> : <>
       <section className="model-panel"><div className="section-heading"><h2><KeyRound size={18} />本机模型配置</h2><span className="tag">配置版本 {registry.revision}</span></div>
-        {registry.migration_required && <div className="analysis-warning model-migration"><p>检测到原有单 API 配置。你可以显式复制为 <code>default_api</code>，之后为作品选择角色；原配置保留。</p><button type="button" className="button secondary small" disabled={!!busy} onClick={() => void act("migrate", async () => { const value = await api<ModelRegistry>("/model-registry/migrate", "POST", { expected_hash: registry.hash }); if (alive.current) { setRegistry(value); chooseProfile(value.profiles.find((item) => item.id === "default_api")); setNotice("原 API 已复制为 default_api，请为作品保存角色绑定。"); } await onSaved(); })}>复制原 API 配置</button></div>}
+        {registry.migration_required && <div className="analysis-warning model-migration"><p>检测到原有单 API 配置。你可以显式复制为 <code>default_api</code>，之后为作品选择角色；原配置保留。</p><button type="button" className="button secondary small" disabled={!!busy} onClick={() => { if (!canReplaceProfile()) return; void act("migrate", async () => { const value = await api<ModelRegistry>("/model-registry/migrate", "POST", { expected_hash: registry.hash }); if (alive.current) { setRegistry(value); resetProfile(value.profiles.find((item) => item.id === "default_api")); setNotice("原 API 已复制为 default_api，请为作品保存角色绑定。"); } await onSaved(); }); }}>复制原 API 配置</button></div>}
         <div className="model-profiles"><div className="model-profile-list"><button className={`model-profile-item ${!selectedProfile ? "selected" : ""}`} disabled={!!busy} type="button" onClick={() => chooseProfile()}><Plus size={14} /><span>添加模型配置</span></button>{registry.profiles.map((item) => <button type="button" key={item.id} className={`model-profile-item ${selectedProfile === item.id ? "selected" : ""}`} disabled={!!busy} onClick={() => chooseProfile(item)}><span><strong>{item.label}</strong><small>{item.model}</small><small>{item.has_api_key ? "密钥已配置" : "未配置密钥"}</small></span></button>)}</div>
           <form className="model-profile-form" onSubmit={(event) => { event.preventDefault(); void act("profile", () => saveProfile()); }}>
             <div className="model-form-grid"><label>逻辑 ID<input required pattern="[a-z][a-z0-9_-]*" maxLength={64} disabled={!!busy || !!selectedProfile} value={profile.id} onChange={(event) => setProfile({ ...profile, id: event.target.value })} placeholder="例如 deepseek_writer" /></label><label>显示名称<input required maxLength={120} disabled={!!busy} value={profile.label} onChange={(event) => setProfile({ ...profile, label: event.target.value })} placeholder="例如 主写模型" /></label>
@@ -165,7 +174,7 @@ export default function MultiModelWorkspace({ project, documents, onSaved, onOpe
             <fieldset className="model-role-checks"><legend>允许用于</legend>{roles.map((role) => <label key={role.id}><input type="checkbox" disabled={!!busy} checked={profile.roles.includes(role.id)} onChange={(event) => setProfile({ ...profile, roles: event.target.checked ? [...profile.roles, role.id] : profile.roles.filter((item) => item !== role.id) })} />{role.label}</label>)}</fieldset>
             <label className="model-checkbox"><input type="checkbox" checked={clearKey} disabled={!!busy} onChange={(event) => { setClearKey(event.target.checked); if (event.target.checked) setSecret(""); }} />清除此配置的本机密钥</label><label className="model-checkbox"><input type="checkbox" checked={profile.allow_loopback} disabled={!!busy} onChange={(event) => setProfile({ ...profile, allow_loopback: event.target.checked })} />允许本机回环接口</label>
             {changedEndpoint && <p className="inline-error">地址已变化，请填写新服务的密钥或显式清除旧密钥。</p>}
-            <p className="model-caption">API 使用 OpenAI 兼容协议。上限与报价由你声明，不表示已验证服务能力；保存不会调用模型。密钥只保存在本机。</p>
+            <p className="model-caption">API 使用 OpenAI 兼容协议。上限与报价由你声明，不表示已验证服务能力；保存不会调用模型。密钥只保存在本机。</p>{profileDirty && <p className="analysis-warning" role="status">当前模型配置有未保存修改；切换配置前请先保存或明确放弃。</p>}
             <div className="model-actions">{selectedProfile && <button type="button" className="button secondary small" disabled={!!busy || registry.migration_required || registry.profiles.length < 2} onClick={() => void act("remove", () => saveProfile(true))}><Trash2 size={14} />移除配置</button>}<button className="button primary small" disabled={!!busy || registry.migration_required || changedEndpoint || profile.roles.length === 0}><Save size={14} />保存模型配置</button></div>
           </form></div>
       </section>

@@ -4,13 +4,13 @@ import { api, projectUrl } from "./api";
 import type { AnalysisEvidence, AnalysisStructure, AnalysisToolkit, DocumentItem, Project } from "./api";
 import { Empty } from "./ui";
 
-type Props = { project: Project; documents: DocumentItem[]; onOpen: (path: string, line?: number, expectedHash?: string) => void; onRefresh: () => Promise<void>; view: "toolkit" | "structure" };
+type Props = { project: Project; documents: DocumentItem[]; onOpen: (path: string, line?: number, expectedHash?: string) => void; onRefresh: () => Promise<void>; onDirtyChange?: (dirty: boolean) => void; view: "toolkit" | "structure" };
 function configuration(value: AnalysisToolkit) {
   return { lexicon: value.lexicon, characters: value.characters, threads: value.threads, style: { instructions: value.style.instructions, avoid: value.style.avoid, anchors: value.style.anchors.map(({ path, hash, start_line, end_line }) => ({ path, hash, start_line, end_line })) } };
 }
 function errorText(error: unknown) { return error instanceof Error ? error.message : "操作未完成，请重试。"; }
 
-export default function AnalysisToolkitWorkspace({ project, documents, onOpen, onRefresh, view }: Props) {
+export default function AnalysisToolkitWorkspace({ project, documents, onOpen, onRefresh, onDirtyChange, view }: Props) {
   const base = `${projectUrl(project.novel_id)}/analysis`;
   const [toolkit, setToolkit] = useState<AnalysisToolkit | null>(null);
   const [structure, setStructure] = useState<AnalysisStructure | null>(null);
@@ -26,6 +26,9 @@ export default function AnalysisToolkitWorkspace({ project, documents, onOpen, o
   const stale = !!structure && (signature !== historySignature || structure.toolkit_hash !== toolkit?.hash || (project.canonical_revision !== undefined && structure.canonical_revision !== project.canonical_revision));
   const anchorStale = !!toolkit && (toolkit.stale || toolkit.style.anchors.some((item) => item.stale || documents.find((document) => document.path === item.path)?.hash !== item.hash));
   const dirty = !!toolkit && text !== JSON.stringify(configuration(toolkit), null, 2);
+  const dirtyCallback = useRef(onDirtyChange); dirtyCallback.current = onDirtyChange;
+  useEffect(() => { dirtyCallback.current?.(dirty); }, [dirty]);
+  useEffect(() => () => dirtyCallback.current?.(false), []);
 
   async function load() {
     const request = ++requestId.current;
