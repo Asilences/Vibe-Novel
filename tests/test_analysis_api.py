@@ -308,6 +308,10 @@ class AnalysisAPITests(unittest.TestCase):
             {"expected_hash": None, "api": {**api, secret: True}},
             {"expected_hash": None, "api": {**api, "api_key": {secret: True}}},
             {"expected_hash": None, "api": {**api, "allow_loopback": "true"}},
+            {"expected_hash": None, "api": {**api, "price_input_usd": True}},
+            {"expected_hash": None, "api": {**api, "price_output_usd": "1.5"}},
+            {"expected_hash": None, "api": {**api, "price_input_usd": -0.01}},
+            {"expected_hash": None, "api": {**api, "price_output_usd": 1_000_001}},
         ]
         for body in invalid:
             with self.subTest(body=body):

@@ -96,6 +96,24 @@
 .rb-import input, .rb-import select { width: 100%; min-width: 0; border: 1px solid #e1dbe3; background: white; border-radius: 6px; padding: 9px 10px; color: #68576e; font-size: 13px; line-height: 1.6; }
 .rb-import input:focus, .rb-import select:focus { outline: 2px solid #c4b08e; outline-offset: 2px; }
 .rb-research-form { padding: 0 15px 17px; border: 1px solid #e6dce9; background: #fdfbfe; border-radius: 7px; margin-top: 18px; }
+.rb-workflow { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; list-style: none; padding: 14px 0; margin: 14px 0 0; border-top: 1px solid #eee5f1; }
+.rb-workflow > li { display: flex; align-items: flex-start; gap: 8px; color: #a89bad; min-width: 0; }
+.rb-workflow > li > span { display: flex; align-items: center; justify-content: center; flex-shrink: 0; width: 23px; height: 23px; border: 1px solid #e2dbe7; border-radius: 50%; font-size: 11px; }
+.rb-workflow > li > div { display: flex; flex-direction: column; gap: 5px; padding-top: 2px; }
+.rb-workflow strong { font-size: 12px; font-weight: 500; line-height: 1.5; }
+.rb-workflow small { font-size: 10px; line-height: 1.8; }
+.rb-workflow .current { color: #8b7049; }
+.rb-workflow .current > span { background: #f4ebd9; border-color: #cbb58e; }
+.rb-workflow .done { color: #718463; }
+.rb-workflow .done > span { background: #f1f6eb; border-color: #cbd8bd; }
+.rb-flow-controls { border-top: 1px solid #e9dfec; padding-top: 16px; margin-top: 16px; }
+.rb-flow-controls > .rb-alert { margin-top: 0; }
+.rb-flow-actions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 15px; }
+.rb-flow-actions > div { min-width: 0; }
+.rb-flow-actions button { width: 100%; min-height: 42px; white-space: normal; line-height: 1.7; justify-content: center; text-align: center; }
+.rb-flow-actions button > svg { flex-shrink: 0; }
+.rb-flow-help { color: #8d7b95; font-size: 11px; line-height: 1.9; margin: 9px 0 0; overflow-wrap: anywhere; }
+.rb-flow-help ul { margin: 0; padding-left: 16px; }
 .rb-selection { max-height: 285px; overflow-y: auto; border-top: 1px solid #eee5f1; border-bottom: 1px solid #eee5f1; padding: 8px 0; }
 .rb-selection > label { margin: 8px 0; padding: 5px; }
 .rb-selection > label:hover { background: #f6f1e7; }
@@ -140,6 +158,8 @@
   .rb-reader { border-left: 0; border-top: 1px solid #eee4f0; padding: 0; }
   .rb-detail-heading { flex-wrap: wrap; gap: 7px; }
   .rb-grid { grid-template-columns: minmax(0, 1fr); }
+  .rb-workflow { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .rb-flow-actions { grid-template-columns: minmax(0, 1fr); gap: 13px; }
 }
 @media (max-width: 760px) {
   .rb-heading { flex-wrap: wrap; }

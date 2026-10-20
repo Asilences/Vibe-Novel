@@ -168,6 +168,8 @@ class APISettings(Input):
     api_key: StrictStr = Field(default="", max_length=16384)
     clear_api_key: bool = False
     allow_loopback: bool = False
+    price_input_usd: Optional[float] = Field(default=None, ge=0, le=1_000_000, allow_inf_nan=False)
+    price_output_usd: Optional[float] = Field(default=None, ge=0, le=1_000_000, allow_inf_nan=False)
 
 
 class SaveSettings(Input):
@@ -446,7 +448,8 @@ def create_app(workspace: Path, *, frontend_dir: Optional[Path] = None, job_mana
 
     @app.put("/api/settings")
     def update_api_settings(body: SaveSettings):
-        return save_settings(store.workspace, body.api.model_dump(), body.expected_hash)
+        omitted_prices = {"price_input_usd", "price_output_usd"} - body.api.model_fields_set
+        return save_settings(store.workspace, body.api.model_dump(exclude=omitted_prices), body.expected_hash)
 
     @app.get("/api/model-registry")
     def model_registry():

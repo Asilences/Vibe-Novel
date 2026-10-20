@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -28,6 +29,8 @@ class StudioSettings:
     api_key: str = field(default="", repr=False)
     allow_loopback: bool = False
     max_output_tokens: Optional[int] = None
+    price_input_usd: Optional[float] = None
+    price_output_usd: Optional[float] = None
 
 
 def _unique(pairs):
@@ -53,6 +56,14 @@ def _text(value, limit):
     if any(ord(char) < 32 or ord(char) == 127 for char in value):
         raise SettingsError("本地 API 配置包含无效控制字符")
     return value.strip()
+
+
+def _price(value):
+    # Prices are USD per million tokens. Missing is unknown, never free.
+    if value is not None and (type(value) not in (int, float)
+                              or not 0 <= value <= 1_000_000 or not math.isfinite(value)):
+        raise SettingsError("模型价格需要非负有限数值或留空")
+    return value
 
 
 def load_settings(workspace: Path, environment: Optional[Mapping[str, str]] = None) -> StudioSettings:
@@ -87,13 +98,15 @@ def load_settings(workspace: Path, environment: Optional[Mapping[str, str]] = No
         # Read legacy files without re-enabling the retired interactive adapter.
         api = value["api"]
         required = {"base_url", "model", "api_key"}
-        if not required <= set(api) or set(api) - required - {"allow_loopback"}:
+        if not required <= set(api) or set(api) - required - {"allow_loopback", "price_input_usd", "price_output_usd"}:
             raise SettingsError("本地 API 配置结构或字段无效")
         if "allow_loopback" in api and type(api["allow_loopback"]) is not bool:
             raise SettingsError("本地 API 配置的本机接口开关需要布尔值")
         # Validate file fields even if overridden by an environment value.
         for name, limit in (("base_url", 4096), ("model", 500), ("api_key", 16384)):
             _text(api[name], limit)
+        for name in ("price_input_usd", "price_output_usd"):
+            _price(api.get(name))
     resolved = {}
     for name, variable, limit in (("base_url", "VIBENOVEL_API_BASE", 4096),
                                   ("model", "VIBENOVEL_API_MODEL", 500),
@@ -105,7 +118,12 @@ def load_settings(workspace: Path, environment: Optional[Mapping[str, str]] = No
         if switch not in ("", "0", "1"):
             raise SettingsError("API 环境配置的本机接口开关需要 0 或 1")
         loopback = switch == "1"
-    return StudioSettings(default_provider=provider, allow_loopback=loopback, **resolved)
+    # A file quote belongs to that exact endpoint/model. Environment overrides
+    # must not apply another model's price to a paid-budget preview.
+    same_model = all(resolved[name] == api[name].strip() for name in ("base_url", "model"))
+    prices = {name: api.get(name) if same_model else None
+              for name in ("price_input_usd", "price_output_usd")}
+    return StudioSettings(default_provider=provider, allow_loopback=loopback, **resolved, **prices)
 
 
 PRESETS = [
@@ -154,7 +172,8 @@ def _public_settings(workspace, environment):
             raise SettingsError("本地 API 地址无效，请在配置文件中修正后重新打开设置") from None
     return {"hash": _current_hash(workspace), "default_provider": "api",
             "api": {"base_url": settings.base_url, "model": settings.model,
-                    "has_api_key": bool(settings.api_key), "allow_loopback": settings.allow_loopback},
+                    "has_api_key": bool(settings.api_key), "allow_loopback": settings.allow_loopback,
+                    "price_input_usd": settings.price_input_usd, "price_output_usd": settings.price_output_usd},
             "environment_overrides": [field for field, variable in _ENV_FIELDS.items() if variable in environment],
             "presets": PRESETS}
 
@@ -179,13 +198,16 @@ def save_settings(workspace: Path, api: dict, expected_hash: Optional[str],
                                       or not re.fullmatch(r"[0-9a-f]{64}", expected_hash)):
         raise SettingsError("配置版本无效，请重新打开设置")
     if (not isinstance(api, dict) or not {"base_url", "model", "allow_loopback"} <= set(api)
-            or set(api) - {"base_url", "model", "api_key", "clear_api_key", "allow_loopback"}
+            or set(api) - {"base_url", "model", "api_key", "clear_api_key", "allow_loopback", "price_input_usd", "price_output_usd"}
             or type(api["allow_loopback"]) is not bool
             or type(api.get("clear_api_key", False)) is not bool):
         raise SettingsError("本地 API 设置字段无效")
     base = _text(api["base_url"], 4096)
     model = _text(api["model"], 500)
     submitted_key = _text(api.get("api_key", ""), 16384)
+    for name in ("price_input_usd", "price_output_usd"):
+        if name in api:
+            _price(api[name])
     clear = api.get("clear_api_key", False)
     if clear and submitted_key:
         raise SettingsError("请分别执行设置密钥或清除密钥")
@@ -203,8 +225,13 @@ def save_settings(workspace: Path, api: dict, expected_hash: Optional[str],
         if base != current.base_url and current.api_key and not submitted_key and not clear:
             raise SettingsError("更换 API 地址时请填写对应密钥，或明确清除原密钥")
         key = "" if clear else submitted_key or current.api_key
+        same_model = base == current.base_url and model == current.model
+        # Older clients omit prices. Retain their quote for the same model;
+        # changing the model clears it unless an explicit new quote is sent.
+        prices = {name: api[name] if name in api else getattr(current, name) if same_model else None
+                  for name in ("price_input_usd", "price_output_usd")}
         value = {"default_provider": "api", "api": {"base_url": base, "model": model,
-                 "api_key": key, "allow_loopback": api["allow_loopback"]}}
+                 "api_key": key, "allow_loopback": api["allow_loopback"], **prices}}
         raw = json_bytes(value)
         if len(raw) > MAX_SETTINGS_BYTES:
             raise SettingsError("本地 API 配置超过大小上限")

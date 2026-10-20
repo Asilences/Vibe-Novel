@@ -16,7 +16,7 @@ from vibenovel.core.documents import DocumentStore
 from vibenovel.core.project import ProjectStore
 from vibenovel.studio.jobs import JobManager
 from vibenovel.studio.providers import OpenAICompatibleProvider, ProviderError, capabilities
-from vibenovel.studio.settings import MAX_SETTINGS_BYTES, SettingsError, load_settings
+from vibenovel.studio.settings import MAX_SETTINGS_BYTES, SettingsError, load_settings, public_settings, save_settings
 
 
 class LocalSettingsTests(unittest.TestCase):
@@ -73,6 +73,71 @@ class LocalSettingsTests(unittest.TestCase):
             self.assertTrue(capabilities(workspace=self.workspace)["api"]["available"])
             OpenAICompatibleProvider(workspace=self.workspace)
             self.assertEqual(dict(os.environ), before)
+
+    def test_prices_round_trip_without_exposing_credentials_and_missing_stays_unknown(self):
+        self.write(self.config())
+        self.assertIsNone(load_settings(self.workspace, {}).price_input_usd)
+        public = public_settings(self.workspace, {})
+        saved = save_settings(self.workspace, {
+            "base_url": public["api"]["base_url"], "model": public["api"]["model"],
+            "allow_loopback": False, "price_input_usd": 0, "price_output_usd": 2.75,
+        }, public["hash"], {})
+        self.assertEqual(saved["api"]["price_input_usd"], 0)
+        self.assertEqual(saved["api"]["price_output_usd"], 2.75)
+        self.assertNotIn("private-local-secret", json.dumps(saved))
+        self.assertNotIn('"api_key"', json.dumps(saved))
+        resolved = load_settings(self.workspace, {})
+        self.assertEqual((resolved.price_input_usd, resolved.price_output_usd), (0, 2.75))
+        self.assertEqual(resolved.api_key, "private-local-secret")
+
+    def test_omitted_prices_preserve_same_model_but_changed_model_clears_and_null_is_explicit(self):
+        self.write(self.config(price_input_usd=1.5, price_output_usd=3.0))
+        public = public_settings(self.workspace, {})
+        fields = {"base_url": public["api"]["base_url"], "model": public["api"]["model"], "allow_loopback": False}
+        saved = save_settings(self.workspace, fields, public["hash"], {})
+        self.assertEqual((saved["api"]["price_input_usd"], saved["api"]["price_output_usd"]), (1.5, 3))
+        cleared = save_settings(self.workspace, dict(fields, price_input_usd=None), saved["hash"], {})
+        self.assertIsNone(cleared["api"]["price_input_usd"])
+        self.assertEqual(cleared["api"]["price_output_usd"], 3)
+        changed = save_settings(self.workspace, dict(fields, model="another-model"), cleared["hash"], {})
+        self.assertIsNone(changed["api"]["price_output_usd"])
+        # An old client changing endpoints without new quotes must not carry
+        # even a matching model name's price to a different service.
+        self.write(self.config(price_input_usd=1.5, price_output_usd=3.0))
+        public = public_settings(self.workspace, {})
+        changed = save_settings(self.workspace, dict(fields, base_url="https://other.invalid/v1", clear_api_key=True), public["hash"], {})
+        self.assertIsNone(changed["api"]["price_input_usd"])
+        self.assertIsNone(changed["api"]["price_output_usd"])
+
+    def test_environment_price_binding_uses_exact_effective_model_and_endpoint(self):
+        self.write(self.config(price_input_usd=1.5, price_output_usd=3.0))
+        retained = load_settings(self.workspace, {"VIBENOVEL_API_MODEL": "local-model", "VIBENOVEL_API_KEY": "new-fixture-secret"})
+        self.assertEqual((retained.price_input_usd, retained.price_output_usd), (1.5, 3))
+        for env in ({"VIBENOVEL_API_MODEL": "other-model"}, {"VIBENOVEL_API_MODEL": ""},
+                    {"VIBENOVEL_API_BASE": "https://other.invalid/v1"}):
+            with self.subTest(fields=tuple(env)):
+                settings = load_settings(self.workspace, env)
+                self.assertIsNone(settings.price_input_usd)
+                self.assertIsNone(settings.price_output_usd)
+                # The settings editor still shows the local editable quote.
+                self.assertEqual(public_settings(self.workspace, env)["api"]["price_input_usd"], 1.5)
+
+    def test_invalid_prices_fail_closed_without_writes_or_secret_echo(self):
+        invalid = (True, "1.5", [], {}, -0.01, 1_000_001, 10 ** 400, float("inf"), float("nan"))
+        for name in ("price_input_usd", "price_output_usd"):
+            for price in invalid:
+                with self.subTest(field=name, price_type=type(price).__name__):
+                    self.write(self.config())
+                    public = public_settings(self.workspace, {})
+                    before = self.path.read_bytes()
+                    with self.assertRaises(SettingsError) as caught:
+                        save_settings(self.workspace, {"base_url": public["api"]["base_url"], "model": "local-model",
+                            "allow_loopback": False, "api_key": "submitted-fixture-secret", name: price}, public["hash"], {})
+                    self.assertEqual(self.path.read_bytes(), before)
+                    self.assertNotIn("submitted-fixture-secret", str(caught.exception))
+                    self.write(self.config(**{name: price}))
+                    with self.assertRaises(SettingsError):
+                        load_settings(self.workspace, {"VIBENOVEL_API_MODEL": "cannot-mask-invalid-file"})
 
     def test_invalid_schema_fails_closed_and_does_not_echo_field_names_or_values(self):
         bad = [None, [], {}, {"default_provider": "other", "api": {}},

@@ -325,7 +325,7 @@ export type AnalysisStructure = {
 export type APISettingsData = {
   hash: string | null;
   default_provider: "api";
-  api: { base_url: string; model: string; has_api_key: boolean; allow_loopback: boolean };
+  api: { base_url: string; model: string; has_api_key: boolean; allow_loopback: boolean; price_input_usd: number | null; price_output_usd: number | null };
   environment_overrides: string[];
   presets: { id: string; label: string; base_url: string; models: { id: string; label: string }[] }[];
 };
