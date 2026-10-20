@@ -64,3 +64,12 @@ test("editing a generated method sends one consistent structure in its evidence 
   assert.deepEqual(JSON.parse(payload.content).method, payload.method);
   assert.deepEqual(JSON.parse(payload.content).source_cases, original.source_cases);
 });
+
+test("editing a reference research method retains read-only origin without forging ordinary source refs", () => {
+  const origin = {book_id: "book", edition_id: "original-edition", batch_id: "batch", node_id: "chapter-00001", result_hash: "frozen", evidence: [{chapter_id: "chapter", start_char: 1, end_char: 3, quote: "原句"}]};
+  const entry = {...emptyLibraryEntry("method"), id: "candidate", research_origin: origin, title: "作者修正标题", source_refs: [], adopted: true};
+  const payload = entryPayload(entry);
+  assert.deepEqual(payload.research_origin, origin);
+  assert.deepEqual(payload.source_refs, []);
+  assert.equal("adopted" in payload, false);
+});

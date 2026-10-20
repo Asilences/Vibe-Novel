@@ -128,3 +128,9 @@
 .library-report-fragment small { color: #6d6270; line-height: 1.7; }
 .library-report-fields details > summary { color: #766044; font-size: 11px; cursor: pointer; }
 .library-report-fields blockquote { max-height: 220px; overflow-y: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+.library-research-origin { margin: 20px 0; padding: 16px; border: 1px solid #e8e0eb; border-radius: 8px; background: #fbfaf5; }
+.library-research-origin h3 { margin-top: 0; font-size: 14px; font-weight: 500; }
+.library-research-origin details { margin: 12px 0; font-size: 12px; }
+.library-origin-hash { overflow-wrap: anywhere; }
+
+.task-reference-banner { position:fixed; z-index:35; left:50%; transform:translateX(-50%); bottom:20px; display:flex; gap:16px; align-items:center; padding:12px 20px; background:#fcf8e9; border:1px solid #d8c893; border-radius:10px; box-shadow:0 4px 20px #382b4a15; font-size:12px; }

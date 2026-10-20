@@ -84,7 +84,7 @@ export type LibraryEntry = {
   outbound: LibraryOutbound; status: "inbox" | "ready" | "archived";
   verification: "unverified" | "checked" | "disputed" | "needs_evidence";
   provenance: "AUTHOR" | "AI_SUGGESTED"; source_refs: LibrarySourceRef[]; method?: LibraryMethod;
-  analysis?: Record<string, unknown>; adopted?: boolean; adoption?: Record<string, unknown> | null;
+  analysis?: Record<string, unknown>; research_origin?: Record<string, unknown>; adopted?: boolean; adoption?: Record<string, unknown> | null;
   version_id: string; hash: string; revision: number; created_at?: string; updated_at?: string;
   [key: string]: unknown;
 };

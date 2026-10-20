@@ -1,3 +1,4 @@
+import { useTaskReference } from "./TaskReferenceContext";
 import { useEffect, useRef, useState } from "react";
 import { ArrowRight, Eye, GitBranch, KeyRound, LoaderCircle, Pause, Play, Plus, RefreshCw, Save, ShieldCheck, Square, Trash2 } from "lucide-react";
 import { api, ApiError, formatDate, kindLabels, leaf, projectUrl, stateLabels } from "./api";
@@ -30,6 +31,7 @@ export function JobRouteDetails({ route, attempts, budget }: { route?: Record<st
 }
 
 export default function MultiModelWorkspace({ project, documents, onSaved, onOpen, onTask }: { project: Project; documents: DocumentItem[]; onSaved: () => Promise<void>; onOpen: (path: string) => void; onTask: (id: string) => void }) {
+  const taskReference = useTaskReference(project.novel_id);
   const base = projectUrl(project.novel_id);
   const [registry, setRegistry] = useState<ModelRegistry | null>(null);
   const [routing, setRouting] = useState<RoutingSettings | null>(null);
@@ -61,7 +63,7 @@ export default function MultiModelWorkspace({ project, documents, onSaved, onOpe
   const actionBusy = useRef(false);
   const source = documents.find((item) => item.path === sourcePath);
   const sources = documents.filter((item) => item.path.endsWith(".md") && /^(drafts|chapters|outlines\/source)\//.test(item.path));
-  const currentIdentity = JSON.stringify([source?.path, source?.hash, instruction, withReview, withMemory, independentReview, registry?.hash, routing?.hash]);
+  const currentIdentity = JSON.stringify([source?.path, source?.hash, instruction, withReview, withMemory, independentReview, registry?.hash, routing?.hash, taskReference.ticket]);
   const policyDirty = !!routing && JSON.stringify(policy) !== JSON.stringify(routing.policy);
   const identityRef = useRef(currentIdentity); identityRef.current = currentIdentity;
   const selectedSaved = registry?.profiles.find((item) => item.id === selectedProfile);
@@ -124,7 +126,7 @@ export default function MultiModelWorkspace({ project, documents, onSaved, onOpe
     setNotice(remove ? "模型配置已移除。若仍被角色引用，请重新绑定后再开始任务。" : "本机模型配置已保存；尚未调用服务商测试连接。");
     try { await onSaved(); } catch { if (alive.current) setNotice("模型配置已保存，工作台状态尚未刷新；无需再次提交密钥。"); }
   }
-  const taskRequest = () => ({ kind: "rewrite", provider: "api", document_path: source?.path, document_hash: source?.hash, instruction: instruction.trim() });
+  const taskRequest = () => ({ ...(taskReference.selection ? {library_selection:taskReference.selection}:{}), kind: "rewrite", provider: "api", document_path: source?.path, document_hash: source?.hash, instruction: instruction.trim() });
   async function routePreview() {
     const identity = currentIdentity;
     const value = await api<Record<string, unknown>>(`${base}/routes/preview`, "POST", taskRequest());
@@ -134,7 +136,7 @@ export default function MultiModelWorkspace({ project, documents, onSaved, onOpe
     if (!preview || currentIdentity !== previewIdentity) return;
     const value = await api<ModelWorkflow>(`${base}/workflows`, "POST", { request: { ...taskRequest(), expected_library_hash: libraryPreviewHash(preview), expected_configuration: libraryTaskConfiguration(preview) }, review: withReview, memory: withMemory, independent_review: withReview && independentReview });
     if (!alive.current) return;
-    setWorkflow(value); setWorkflows((items) => [value, ...items.filter((item) => item.id !== value.id)]); setNotice("首个编辑节点已启动。后续节点须查看结果后点击启动，不会自动连续调用。");
+    taskReference.consume(); setPreview(null); setPreviewIdentity(""); setWorkflow(value); setWorkflows((items) => [value, ...items.filter((item) => item.id !== value.id)]); setNotice("首个编辑节点已启动。后续节点须查看结果后点击启动，不会自动连续调用。");
   }
   async function workflowAction(action: "advance" | "pause" | "cancel") {
     if (!workflow || action === "advance" && workflow.stale) return;

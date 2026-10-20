@@ -1,3 +1,5 @@
+import { useTaskReference } from "./TaskReferenceContext";
+import type { TaskReference } from "./TaskReferenceContext";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { BookOpen, Check, CircleAlert, Download, FileSearch, GitCompareArrows, LoaderCircle, RefreshCw, Scissors, ShieldCheck, Sparkles, Upload } from "lucide-react";
 import { api, activeStates, download, formatDate, leaf, projectUrl, stateLabels } from "./api";
@@ -16,6 +18,7 @@ const length = (text: string) => Array.from(text).length;
 const selectionText = (text: string, start: number, end: number) => Array.from(text).slice(start, end).join("");
 
 export default function ManuscriptWorkspace({ project, documents, jobs, providers, onSettings, onImport, onRefresh, onOpen, onJob }: Props) {
+  const taskReference = useTaskReference(project.novel_id);
   const base = `${projectUrl(project.novel_id)}/manuscripts`;
   const [sessions, setSessions] = useState<ManuscriptSummary[]>([]);
   const [sessionOmitted, setSessionOmitted] = useState<unknown[]>([]);
@@ -43,7 +46,7 @@ export default function ManuscriptWorkspace({ project, documents, jobs, provider
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
-  const [taskPreview, setTaskPreview] = useState<{ request: Record<string, unknown>; route: Record<string, unknown> } | null>(null);
+  const [taskPreview, setTaskPreview] = useState<{ request: Record<string, unknown>; route: Record<string, unknown>; reference: TaskReference } | null>(null);
   const alive = useRef(true);
   const requests = useRef({ session: 0, document: 0, result: 0 });
   const documentRef = useRef(document); documentRef.current = document;
@@ -145,10 +148,10 @@ export default function ManuscriptWorkspace({ project, documents, jobs, provider
       if (!document || docStale) throw new Error("请先重新读取当前副本。");
       if (rangeEnabled && !rangeValid) throw new Error("请明确选择有效文本范围；起点包含、终点不包含。");
       if (!goals.length) throw new Error("请至少选择一项编辑目标。");
-      const request = { kind, provider: "api", document_path: document.path, document_hash: document.hash, instruction: instruction.trim(), editorial: { goals, intensity }, ...(rangeEnabled ? { selection: { start_char: start, end_char: end } } : {}), idempotency_key: crypto.randomUUID() };
+      const request = { ...(taskReference.selection ? {library_selection:taskReference.selection}:{}), kind, provider: "api", document_path: document.path, document_hash: document.hash, instruction: instruction.trim(), editorial: { goals, intensity }, ...(rangeEnabled ? { selection: { start_char: start, end_char: end } } : {}), idempotency_key: crypto.randomUUID() };
       const route = await api<Record<string, unknown>>(`${projectUrl(project.novel_id)}/jobs/preview`, "POST", request);
       if (!alive.current) return;
-      setTaskPreview({ request, route });
+      setTaskPreview({ request, route, reference:taskReference.ticket });
     });
   }
   async function submitPreview() {
@@ -158,7 +161,7 @@ export default function ManuscriptWorkspace({ project, documents, jobs, provider
         expected_configuration: libraryTaskConfiguration(taskPreview.route),
         expected_library_hash: libraryPreviewHash(taskPreview.route) });
       if (!alive.current) return;
-      setTaskPreview(null); setSelectedJobId(value.id); setCandidate(null); onJob(value);
+      taskReference.consume(taskPreview.reference); setTaskPreview(null); setSelectedJobId(value.id); setCandidate(null); onJob(value);
       setNotice("已提交 API 任务；结果需审阅后决定是否接受到修订副本。");
     });
   }

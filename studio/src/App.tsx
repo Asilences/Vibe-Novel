@@ -78,6 +78,9 @@ import MultiModelWorkspace, { JobRouteDetails } from "./MultiModelWorkspace";
 import CreationWorkspace from "./CreationWorkspace";
 import LibraryWorkspace from "./LibraryWorkspace";
 import TaskMaterialPreview from "./TaskMaterialPreview";
+import { TaskReferenceContext } from "./TaskReferenceContext";
+import { consumeTaskReference } from "./taskReferenceHelpers";
+import type { TaskReference } from "./TaskReferenceContext";
 import { libraryPreviewHash, libraryTaskConfiguration } from "./libraryHelpers";
 
 type Area =
@@ -143,8 +146,10 @@ export default function App() {
   const [project, setProject] = useState<Project | null>(null);
   const [area, setArea] = useState<Area>("dashboard");
   const [libraryTarget, setLibraryTarget] = useState<{ view: "all" | "sources" | "method"; entry?: string; nonce: number }>({ view: "all", nonce: 0 });
-  const [taskPreview, setTaskPreview] = useState<{ body: Record<string, unknown>; route: Record<string, unknown>; novelId: string } | null>(null);
+  const [taskPreview, setTaskPreview] = useState<{ body: Record<string, unknown>; route: Record<string, unknown>; novelId: string; reference: TaskReference } | null>(null);
   const [taskUncertain, setTaskUncertain] = useState(false);
+  const [taskReference, setTaskReference] = useState<TaskReference>(null);
+  const activeReference = taskReference?.novelId === project?.novel_id ? taskReference?.selection : null;
   const [planningPath, setPlanningPath] = useState("");
   const [planningSource, setPlanningSource] = useState("");
   const [childDirty, setChildDirty] = useState(false);
@@ -808,9 +813,9 @@ export default function App() {
       return;
     }
     await act("task-preview", async () => {
-      const body = { kind: taskKind, provider: "api", document_path: doc.path, document_hash: doc.hash, instruction: instruction.trim(), idempotency_key: crypto.randomUUID(), ...(taskKind === "draft" ? { plan_path: planPath, brief_mode: briefMode, plan_hash: approvedPlans.find((item) => item.path === planPath)?.hash } : {}) };
+      const body = { ...(activeReference ? {library_selection: activeReference}: {}), kind: taskKind, provider: "api", document_path: doc.path, document_hash: doc.hash, instruction: instruction.trim(), idempotency_key: crypto.randomUUID(), ...(taskKind === "draft" ? { plan_path: planPath, brief_mode: briefMode, plan_hash: approvedPlans.find((item) => item.path === planPath)?.hash } : {}) };
       const route = await api<Record<string, unknown>>(`${projectUrl(project.novel_id)}/jobs/preview`, "POST", body);
-      setTaskPreview({ body, route, novelId: project.novel_id }); setTaskUncertain(false);
+      setTaskPreview({ body, route, novelId: project.novel_id, reference:taskReference?.novelId === project.novel_id ? taskReference : null }); setTaskUncertain(false);
     });
   }
   async function confirmTask() {
@@ -820,7 +825,7 @@ export default function App() {
       let result: Job;
       try { result = await api<Job>(`${projectUrl(saved.novelId)}/jobs`, "POST", { ...saved.body, expected_configuration: libraryTaskConfiguration(saved.route), expected_library_hash: libraryPreviewHash(saved.route) }); }
       catch (failure) { if (failure instanceof ApiError && failure.status < 500) setTaskPreview(null); else setTaskUncertain(true); throw failure; }
-      setTaskPreview(null); setTaskUncertain(false);
+      setTaskPreview(null); setTaskUncertain(false); setTaskReference(current => consumeTaskReference(current, saved.reference));
       if (currentProject.current !== saved.novelId) return;
       await refresh(saved.novelId); setSelectedJob(result.id); setArea("tasks");
       if (result.provider === "api" && result.kind === "build_blueprint" && result.repair_candidate && result.state === "awaiting_input") { setRepairJob(result); setCandidate(""); }
@@ -956,12 +961,14 @@ export default function App() {
   const showRight = rightOpen && editorArea;
 
   return (
+    <TaskReferenceContext.Provider value={{pending:taskReference,consume:(used)=>setTaskReference(current => consumeTaskReference(current, used))}}>
     <div
       className={`app ${!leftOpen ? "left-hidden" : ""} ${!showRight ? "right-hidden" : ""}`}
     >
       <a className="skip-link" href="#workspace">
         跳到工作区
       </a>
+      {activeReference && <div className="task-reference-banner" role="status">已固定检索资料，供本书下一次任务使用。<button className="text-button" onClick={() => setTaskReference(null)}>取消本次选用</button></div>}
       <header className="topbar">
         <div className="brand">
           <div className="brand-mark">
@@ -1230,7 +1237,7 @@ export default function App() {
             <p>正在打开作者工作台…</p>
           </div>
         ) : area === "library" ? (
-          <LibraryWorkspace key={`${project?.novel_id || "personal"}-${libraryTarget.nonce}`} project={project} projects={projects} initialView={libraryTarget.view} initialEntry={libraryTarget.entry} onLibrary={(id, entry) => void openLibrary(id, entry)} onSettings={() => setShowSettings(true)} onDirtyChange={setChildDirty} onJob={(job, id) => { if (project?.novel_id === id) setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)]); }} onTasks={(id, jobId) => void openLibraryTasks(id, jobId)} onLegacySources={() => setShowSources(true)} />
+          <LibraryWorkspace key={`${project?.novel_id || "personal"}-${libraryTarget.nonce}`} project={project} projects={projects} initialView={libraryTarget.view} initialEntry={libraryTarget.entry} onLibrary={(id, entry) => void openLibrary(id, entry)} onSettings={() => setShowSettings(true)} onDirtyChange={setChildDirty} onJob={(job, id) => { if (project?.novel_id === id) setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)]); }} onTasks={(id, jobId) => void openLibraryTasks(id, jobId)} onLegacySources={() => setShowSources(true)} onUseRetrieval={(selection) => { if (!project) return; setTaskReference({id:crypto.randomUUID(),novelId: project.novel_id, selection}); notify("已固定检索资料，将用于本书下一次任务；可在发送预览中核对。"); }} />
         ) : !project ? (
           <div className="onboarding">
             <div className="onboarding-kicker">
@@ -2874,6 +2881,7 @@ export default function App() {
         </Modal>
       )}
     </div>
+    </TaskReferenceContext.Provider>
   );
 }
 

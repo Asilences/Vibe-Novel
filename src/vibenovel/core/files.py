@@ -13,6 +13,7 @@ import re
 import shutil
 import stat
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -154,7 +155,19 @@ def atomic_write(path: Path, data: bytes, *, overwrite: bool = False) -> None:
         if overwrite:
             if os.path.lexists(path) and is_link(path):
                 raise VibeNovelError(f"拒绝覆盖链接: {path}")
-            os.replace(temp, path)
+            # Windows readers and virus scanners can briefly deny replacement
+            # of a complete file. Retry only this local publish, never any
+            # model request or document mutation. The old file stays intact.
+            for attempt in range(6):
+                try:
+                    if os.path.lexists(path) and is_link(path):
+                        raise VibeNovelError(f"拒绝覆盖链接: {path}")
+                    os.replace(temp, path)
+                    break
+                except PermissionError as exc:
+                    if getattr(exc, "winerror", None) not in (5, 32, 33) or attempt == 5:
+                        raise
+                    time.sleep(min(.02 * 2 ** attempt, .2))
         else:
             try:
                 os.link(temp, path)

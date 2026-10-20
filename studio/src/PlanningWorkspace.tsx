@@ -1,3 +1,5 @@
+import { useTaskReference } from "./TaskReferenceContext";
+import type { TaskReference } from "./TaskReferenceContext";
 import {
   useCallback,
   useEffect,
@@ -351,6 +353,7 @@ export default function PlanningWorkspace({
   onImport,
   onPaste,
 }: Props) {
+  const taskReference = useTaskReference(project.novel_id);
   const [sourcePath, setSourcePath] = useState(initialSourcePath || "");
   const [start, setStart] = useState(1);
   const [count, setCount] = useState(3);
@@ -363,7 +366,7 @@ export default function PlanningWorkspace({
   const [loadingPackage, setLoadingPackage] = useState(false);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
-  const [taskPreview, setTaskPreview] = useState<{ request: Record<string, unknown>; route: Record<string, unknown> } | null>(null);
+  const [taskPreview, setTaskPreview] = useState<{ request: Record<string, unknown>; route: Record<string, unknown>; reference: TaskReference } | null>(null);
   const [editing, setEditing] = useState<{
     path: string;
     hash: string;
@@ -518,6 +521,7 @@ export default function PlanningWorkspace({
     setError("");
     try {
       const request = {
+        ...(taskReference.selection ? {library_selection:taskReference.selection}:{}),
         kind: "build_blueprint",
         provider: "api",
         document_path: source.path,
@@ -529,7 +533,7 @@ export default function PlanningWorkspace({
       };
       const route = await api<Record<string, unknown>>(`${base}/jobs/preview`, "POST", request);
       if (!alive.current) return;
-      setTaskPreview({ request, route });
+      setTaskPreview({ request, route, reference:taskReference.ticket });
     } catch (failure) {
       if (alive.current) {
         setError(message(failure));
@@ -546,6 +550,7 @@ export default function PlanningWorkspace({
       const job = await api<Job>(`${base}/jobs`, "POST", { ...taskPreview.request,
         expected_configuration: libraryTaskConfiguration(taskPreview.route),
         expected_library_hash: libraryPreviewHash(taskPreview.route) });
+      taskReference.consume(taskPreview.reference);
       if (alive.current) { setTaskPreview(null); onJob(job); }
     } catch (failure) { if (alive.current) setError(message(failure)); }
     finally { if (alive.current) setBusy(""); }

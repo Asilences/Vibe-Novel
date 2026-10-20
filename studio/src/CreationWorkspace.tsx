@@ -1,3 +1,4 @@
+import { useTaskReference } from "./TaskReferenceContext";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { ArrowRight, BookOpen, Check, Eye, Lightbulb, LoaderCircle, Plus, RefreshCw, Save, Settings2, Sparkles, Trash2, X } from "lucide-react";
@@ -49,6 +50,7 @@ function RoutePreview({ preview }: { preview: CreationPreview }) {
 }
 
 export default function CreationWorkspace({ project, documents, jobs, onChanged, onJob, onOpenDocument, onPlanning, onSettings, onDirtyChange }: CreationWorkspaceProps) {
+  const taskReference = useTaskReference(project.novel_id);
   const base = projectUrl(project.novel_id);
   const [catalog, setCatalog] = useState<CreationCatalog | null>(null);
   const [saved, setSaved] = useState<BriefEnvelope | null>(null);
@@ -75,7 +77,7 @@ export default function CreationWorkspace({ project, documents, jobs, onChanged,
   const submitKey = useRef<{ identity: string; key: string } | null>(null);
   const dirty = !!saved && !!brief && JSON.stringify(brief) !== JSON.stringify(saved.brief);
   const pendingTag = !!customTag.trim();
-  const currentIdentity = saved ? generationIdentity(saved) : "";
+  const currentIdentity = saved ? JSON.stringify([generationIdentity(saved), taskReference.ticket]) : "";
   const validPreview = !!preview && !!previewConfiguration(preview) && previewIdentity === currentIdentity && !dirty && !pendingTag;
   const warnings = brief ? briefWarnings(brief) : [];
   const formIssues = brief && catalog ? briefFormIssues(brief, catalog) : [];
@@ -134,8 +136,8 @@ export default function CreationWorkspace({ project, documents, jobs, onChanged,
   }
   async function previewGeneration() {
     if (!saved || dirty || pendingTag || submissionUncertain || !brief?.story_seed.trim()) return;
-    const identity = generationIdentity(saved);
-    const value = await api<CreationPreview>(`${base}/jobs/preview`, "POST", { kind: "generate_story_outline", provider: "api", document_path: saved.path, document_hash: saved.hash, document_version_id: saved.version_id });
+    const identity = currentIdentity;
+    const value = await api<CreationPreview>(`${base}/jobs/preview`, "POST", { ...(taskReference.selection ? {library_selection:taskReference.selection}:{}), kind: "generate_story_outline", provider: "api", document_path: saved.path, document_hash: saved.hash, document_version_id: saved.version_id });
     if (!alive.current || currentBase.current !== base) return;
     setPreview(value); setPreviewIdentity(identity);
     if (!submitKey.current || submitKey.current.identity !== identity) submitKey.current = { identity, key: crypto.randomUUID() };
@@ -144,7 +146,7 @@ export default function CreationWorkspace({ project, documents, jobs, onChanged,
     if (!saved || !validPreview || !submitKey.current || activeJob) return;
     let job: Job;
     try {
-      job = await api<Job>(`${base}/jobs`, "POST", { kind: "generate_story_outline", provider: "api", document_path: saved.path, document_hash: saved.hash, document_version_id: saved.version_id, idempotency_key: submitKey.current.key, expected_configuration: previewConfiguration(preview!), expected_library_hash: libraryPreviewHash(preview!) });
+      job = await api<Job>(`${base}/jobs`, "POST", { ...(taskReference.selection ? {library_selection:taskReference.selection}:{}), kind: "generate_story_outline", provider: "api", document_path: saved.path, document_hash: saved.hash, document_version_id: saved.version_id, idempotency_key: submitKey.current.key, expected_configuration: previewConfiguration(preview!), expected_library_hash: libraryPreviewHash(preview!) });
     } catch (failure) {
       if (alive.current && currentBase.current === base) {
         if (failure instanceof ApiError && failure.status < 500) { setPreview(null); submitKey.current = null; setSubmissionUncertain(false); }
@@ -153,7 +155,7 @@ export default function CreationWorkspace({ project, documents, jobs, onChanged,
       throw failure;
     }
     if (!alive.current || currentBase.current !== base) return;
-    onJob(job); setPreview(null); submitKey.current = null; setSubmissionUncertain(false);
+    taskReference.consume(); onJob(job); setPreview(null); submitKey.current = null; setSubmissionUncertain(false);
     setNotice("总纲任务已提交。完成后在下方查看候选；不会自动展开章纲或写入正式正文。");
     await onChanged();
   }
