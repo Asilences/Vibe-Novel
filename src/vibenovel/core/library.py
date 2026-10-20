@@ -19,6 +19,8 @@ from vibenovel.importers.text import EXTRACTOR_VERSION, _paragraph_refs, _select
 from .files import atomic_write, digest, json_bytes, read_json, safe_path
 from .locking import ConflictError, project_lock
 from .project import Project, ProjectStore, utc_now
+from .reference_methods import (preview_reference_methods as _preview_reference_methods,
+                                validate_research_origin, MAX_RESEARCH_TASK_DEPENDENCIES_BYTES)
 
 ENTRY_TYPES = ("literature", "material", "technique", "style", "term", "method")
 OUTBOUND = ("local", "summary", "excerpts")
@@ -196,6 +198,8 @@ class LibraryStore:
                     if identity in before_state["entities"]["bundle"]:
                         continue
                     record = read_json(self._record_path("bundle", identity, versions[-1]["version_id"]), max_bytes=MAX_RECORD_BYTES)
+                    if record["data"].get("research_origin") is not None:
+                        validate_research_origin(self.workspace, record["data"]["research_origin"])
                     self._check_analysis(before_state, record["data"].get("expected_analysis"))
                     snapshot = record["data"].get("task_snapshot")
                     if snapshot is not None:
@@ -262,6 +266,12 @@ class LibraryStore:
         journal = {"schema_version": 1, "scope": self.scope, "owner": self.owner,
                    "before_hash": before_hash, "after_hash": digest(encoded), "after": after}
         atomic_write(self.path(".state/journal.json"), json_bytes(journal))
+        # Recheck after staging immutable objects and before manifest publish.
+        # A concurrent book-store policy change still is not a cross-lock
+        # transaction; journal recovery independently repeats this guard.
+        for kind, _, data in changes:
+            if kind == "bundle" and data.get("research_origin") is not None:
+                validate_research_origin(self.workspace, data["research_origin"])
         atomic_write(self.path(".state/manifest.json"), encoded, overwrite=before_hash is not None)
         self.path(".state/journal.json").unlink()
         return [self._read(after, kind, identity, version) for kind, identity, version in outputs]
@@ -442,13 +452,56 @@ class LibraryStore:
 
     def save_entry(self, payload, expected_hash=None, actor="AUTHOR"):
         with self._locked() as state:
-            data = self._entry_payload(payload, state, actor)
+            if not isinstance(payload, dict):
+                raise VibeNovelError("资料卡字段无效")
             identity = payload.get("id") or uuid4().hex
             self._check_expected(state, "entry", identity, expected_hash)
             previous = self._read(state, "entry", identity) if identity in state["entities"]["entry"] else None
+            supplied_origin = payload.get("research_origin")
+            origin = previous.get("research_origin") if previous else None
+            if "research_origin" in payload and (origin is None or supplied_origin != origin):
+                raise VibeNovelError("研究来源只能由成功研究节点发布，不能自填、复制或删除")
+            editable = {key: value for key, value in payload.items() if key != "research_origin"}
+            if origin is not None:
+                if editable.get("type") != "method":
+                    raise VibeNovelError("研究方法不能改为普通资料卡以移除来源约束")
+                try:
+                    validate_research_origin(self.workspace, origin)
+                except VibeNovelError:
+                    # A withdrawn/broken external source must not trap an
+                    # author in an unmanageable inbox. This branch permits
+                    # only a terminal restriction, never content repair,
+                    # source removal, permission restoration or adoption.
+                    data = self._restrict_invalid_research_entry(previous, editable, actor)
+                else:
+                    data = self._entry_payload(editable, state, actor)
+            else:
+                data = self._entry_payload(editable, state, actor)
+            if origin is not None:
+                data["research_origin"] = copy.deepcopy(origin)
             same_permission = previous is not None and (previous["outbound"], previous["withdrawn"]) == (data["outbound"], data["withdrawn"])
             data["authorization_revision"] = previous["authorization_revision"] if same_permission else uuid4().hex
             return self._decorate_entry(self._commit(state, [("entry", identity, data)])[0])
+
+    def _restrict_invalid_research_entry(self, previous, payload, actor):
+        restricted = {"outbound", "status", "withdrawn", "withdrawal_reason"}
+        accepted = {"id", "type", "title", "content", "tags", "summary", "outbound", "status", "verification",
+                    "provenance", "source_refs", "method", "analysis", "withdrawn", "withdrawal_reason"}
+        if (actor != "AUTHOR" or set(payload) - accepted
+                or any(value != previous.get(key) for key, value in payload.items() if key not in restricted)):
+            raise ConflictError("研究来源失效后仅可收紧外发、归档或撤回；不能修改内容或删除来源")
+        value = {name: payload.get(name, previous[name]) for name in restricted}
+        value["withdrawal_reason"] = _text(value["withdrawal_reason"])
+        if (value["outbound"] not in OUTBOUND or value["status"] not in ("inbox", "ready", "archived")
+                or type(value["withdrawn"]) is not bool
+                or OUTBOUND.index(value["outbound"]) > OUTBOUND.index(previous["outbound"])
+                or value["status"] != previous["status"] and value["status"] != "archived"
+                or previous["withdrawn"] and not value["withdrawn"]
+                or not (value["outbound"] == "local" or value["status"] == "archived" or value["withdrawn"])):
+            raise ConflictError("失效研究方法只能保留或收紧权限，不能恢复为可用状态")
+        data = self._data(previous)
+        data.update(value, adoption=None, provenance="AUTHOR")
+        return data
 
     @staticmethod
     def _decorate_entry(entry):
@@ -520,6 +573,8 @@ class LibraryStore:
         personal = LibraryStore(self.workspace)
         entry = personal.entry(entry_id, version_id)
         current_entry = personal.entry(entry_id)
+        personal._validate_research_entry(entry)
+        personal._validate_research_entry(current_entry)
         if entry.get("withdrawn") or current_entry["withdrawn"]:
             raise ConflictError("所选资料已撤回")
         if OUTBOUND.index(current_entry["outbound"]) < OUTBOUND.index(entry["outbound"]):
@@ -615,6 +670,7 @@ class LibraryStore:
             if current["type"] != "method" or current["withdrawn"] or not current["method"]["steps"]:
                 raise VibeNovelError("只能采用未撤回且有明确步骤的方法卡")
             self._refs(current["source_refs"], state)
+            self._validate_research_entry(current)
             data = self._data(current)
             data["adoption"] = {"id": uuid4().hex, "actor": "AUTHOR", "at": utc_now(), "source_version_id": current["version_id"]}
             return self._decorate_entry(self._commit(state, [("entry", identity, data)])[0])
@@ -625,8 +681,21 @@ class LibraryStore:
             value["authorization_revision"] = authorization_revision or record["authorization_revision"]
         return value
 
+    def _validate_research_entry(self, entry):
+        origin = entry.get("research_origin")
+        if origin is not None:
+            if entry.get("type") != "method":
+                raise ConflictError("研究来源只能附属于方法卡")
+            validate_research_origin(self.workspace, origin)
+        return origin
+
+    @staticmethod
+    def _research_dep(origin):
+        return {"kind": "reference_research", "scope": "reference_books", "owner": origin["book_id"],
+                "origin": copy.deepcopy(origin)}
+
     def select_for_task(self, payload):
-        allowed = {"purpose", "source_ranges", "source_ids", "entry_ids", "binding_ids", "query", "max_characters", "automatic"}
+        allowed = {"purpose", "source_ranges", "source_ids", "entry_ids", "binding_ids", "query", "max_characters", "automatic", "retrieval_selection"}
         if not isinstance(payload, dict) or set(payload) - allowed or payload.get("purpose", "reference") not in PURPOSES:
             raise VibeNovelError("任务资料选择字段无效")
         purpose = payload.get("purpose", "reference")
@@ -641,6 +710,10 @@ class LibraryStore:
         automatic = payload.get("automatic", False)
         if type(automatic) is not bool:
             raise VibeNovelError("自动选择开关需要布尔值")
+        retrieval = None
+        if payload.get("retrieval_selection") is not None:
+            from .reference_retrieval import ReferenceRetrievalStore
+            retrieval = ReferenceRetrievalStore(self.workspace).task_selection(payload["retrieval_selection"])
         if automatic:
             overview = self.overview()
             policy = overview["policy"]
@@ -692,6 +765,14 @@ class LibraryStore:
                     if automatic and identity not in policy["policy"]["required_ids"]:
                         continue
                     raise ConflictError("方法卡尚未由作者采用")
+                try:
+                    research_origin = self._validate_research_entry(entry)
+                except VibeNovelError:
+                    if not automatic or identity in policy["policy"]["required_ids"]:
+                        raise
+                    manifest.append({"kind": "entry", "id": identity, "included": False,
+                                     "reason": "可选研究方法的固定来源已失效，未发送"})
+                    continue
                 refs = self._refs(entry["source_refs"], state)
                 reference_deps = []
                 for ref in refs:
@@ -708,6 +789,9 @@ class LibraryStore:
                     text = entry["content"] + ("\n" + json.dumps(entry["method"], ensure_ascii=False) if entry["type"] == "method" else "")
                 if attach(entry, text, "自动词项选材" if automatic else "作者明确选择"):
                     deps.extend(reference_deps)
+                    if research_origin is not None:
+                        deps.append(self._research_dep(research_origin))
+                        manifest[-1]["evidence_note"] = "参考研究原文仅作为封存依赖，未自动发送或计为模型实读引文。"
                     if entry["outbound"] == "excerpts":
                         # A card's citations are dependencies, not automatically
                         # transmitted source text. Only a verbatim quote that is
@@ -718,7 +802,14 @@ class LibraryStore:
                             manifest[-1]["evidence_note"] = "%d条来源仅绑定依赖，原句未在卡片实发正文中出现。" % omitted
             for identity in dict.fromkeys(bindings):
                 bound = self._read(state, "binding", identity)
-                self._validate_binding(bound)
+                try:
+                    self._validate_binding(bound)
+                except VibeNovelError:
+                    if not automatic or identity in policy["policy"]["required_ids"]:
+                        raise
+                    manifest.append({"kind": "binding", "id": identity, "included": False,
+                                     "reason": "可选固定资料的来源或授权已失效，未发送"})
+                    continue
                 entry = bound["snapshot"]
                 if bound["purpose"] not in (purpose, "reference") or entry["outbound"] == "local" or (entry["type"] == "method" and not entry.get("adoption")):
                     if automatic and identity not in policy["policy"]["required_ids"]:
@@ -730,12 +821,16 @@ class LibraryStore:
                         raise VibeNovelError("所选资料尚无可外发摘要")
                 else:
                     text = entry["content"] + ("\n" + json.dumps(entry["method"], ensure_ascii=False) if entry["type"] == "method" else "")
-                if attach(bound, text, "本书固定选用版本") and entry["outbound"] == "excerpts":
-                    refs = entry["source_refs"]
-                    fragments.extend(ref for ref in refs if ref["quote"] in text)
-                    omitted = len(refs) - sum(ref["quote"] in text for ref in refs)
-                    if omitted:
-                        manifest[-1]["evidence_note"] = "%d条来源仅绑定依赖，原句未在卡片实发正文中出现。" % omitted
+                if attach(bound, text, "本书固定选用版本"):
+                    if entry.get("research_origin") is not None:
+                        deps.append(self._research_dep(entry["research_origin"]))
+                        manifest[-1]["evidence_note"] = "参考研究原文仅作为封存依赖，未自动发送或计为模型实读引文。"
+                    if entry["outbound"] == "excerpts":
+                        refs = entry["source_refs"]
+                        fragments.extend(ref for ref in refs if ref["quote"] in text)
+                        omitted = len(refs) - sum(ref["quote"] in text for ref in refs)
+                        if omitted:
+                            manifest[-1]["evidence_note"] = "%d条来源仅绑定依赖，原句未在卡片实发正文中出现。" % omitted
             refs = self._refs(payload.get("source_ranges", []), state)
             for ref in refs:
                 src = self._source_from_ref(ref, state)
@@ -743,6 +838,16 @@ class LibraryStore:
                     raise ConflictError("来源未允许摘录外发；仅摘要政策不能发送原句")
                 fragments.append(ref)
                 attach(src, ref["quote"], "作者明确选定来源区间")
+            if retrieval is not None:
+                if len("\n\n".join(parts + [retrieval["text"]])) > min(ceiling, 24000):
+                    raise VibeNovelError("所选检索与卡片资料合计超过24000字符，请减少范围；未静默截断")
+                from .reference_retrieval import ReferenceRetrievalStore
+                ReferenceRetrievalStore(self.workspace).validate_task_selection(retrieval)
+                parts.append(retrieval["text"])
+                deps.append({"kind": "reference_retrieval", "scope": "reference_books", "owner": retrieval["index_id"], "snapshot": retrieval})
+                manifest.extend({"kind": "reference_retrieval", "id": item["id"], "title": item["title"], "layer": item["layer"],
+                                 "hash": item["hash"], "purpose": purpose, "reason": "作者明确选中检索结果并预览外发范围",
+                                 "evidence_note": "仅文本块实际发送；检索证据列表未自动计为模型实读。"} for item in retrieval["records"])
             if not parts and not automatic:
                 raise VibeNovelError("未选择可用于本次任务的资料")
             if automatic and not parts:
@@ -751,6 +856,8 @@ class LibraryStore:
             value = {"schema_version": 1, "scope": self.scope, "owner": self.owner, "library_id": state["library_id"],
                      "text": "\n\n".join(parts), "manifest": manifest, "source_fragments": fragments,
                      "typed_deps": deps, "policy": {"version_id": policy["version_id"], "hash": policy["hash"]}}
+            if len(json_bytes([dep for dep in deps if dep["kind"] == "reference_research"])) > MAX_RESEARCH_TASK_DEPENDENCIES_BYTES:
+                raise VibeNovelError("任务参考研究依赖超过256KiB，请减少方法；未截断来源")
             value["hash"] = digest(json_bytes(value))
             return value
 
@@ -762,9 +869,11 @@ class LibraryStore:
             if state["library_id"] != bound["source_library_id"]:
                 raise ConflictError("个人库身份已变化")
             current = personal._read(state, "entry", bound["entry_id"])
+            personal._validate_research_entry(current)
             if current["withdrawn"] or current["authorization_revision"] != bound["authorization_revision"]:
                 raise ConflictError("个人库资料外发/撤回授权已变化，请重新显式选用")
             frozen = personal._decorate_entry(personal._read(state, "entry", bound["entry_id"], bound["entry_version_id"]))
+            personal._validate_research_entry(frozen)
             if frozen["hash"] != bound["entry_hash"] or frozen != bound["snapshot"]:
                 raise ConflictError("固定资料选用快照损坏")
             for source in bound["sources"]:
@@ -791,7 +900,23 @@ class LibraryStore:
             raise ConflictError("任务资料检索策略版本已变化")
         if not isinstance(snapshot["typed_deps"], list) or len(snapshot["typed_deps"]) > 200:
             raise ConflictError("任务资料依赖列表无效")
+        if len(json_bytes([dep for dep in snapshot["typed_deps"] if isinstance(dep, dict) and dep.get("kind") == "reference_research"])) > MAX_RESEARCH_TASK_DEPENDENCIES_BYTES:
+            raise ConflictError("任务参考研究依赖超过256KiB")
         for dep in snapshot["typed_deps"]:
+            if isinstance(dep, dict) and dep.get("kind") == "reference_retrieval":
+                if (set(dep) != {"kind", "scope", "owner", "snapshot"} or dep["scope"] != "reference_books"
+                        or not isinstance(dep["snapshot"], dict) or dep["owner"] != dep["snapshot"].get("index_id")
+                        or len(json_bytes(dep)) > 256 * 1024):
+                    raise ConflictError("任务检索资料依赖范围或体积无效")
+                from .reference_retrieval import ReferenceRetrievalStore
+                ReferenceRetrievalStore(self.workspace).validate_task_selection(dep["snapshot"])
+                continue
+            if isinstance(dep, dict) and dep.get("kind") == "reference_research":
+                if (set(dep) != {"kind", "scope", "owner", "origin"} or dep["scope"] != "reference_books"
+                        or not isinstance(dep["origin"], dict) or dep["owner"] != dep["origin"].get("book_id")):
+                    raise ConflictError("任务参考研究依赖所属范围无效")
+                validate_research_origin(self.workspace, dep["origin"])
+                continue
             if (not isinstance(dep, dict) or set(dep) != ({"kind", "scope", "owner", "id", "version_id", "hash", "authorization_revision"}
                                                          if dep.get("kind") == "source" else {"kind", "scope", "owner", "id", "version_id", "hash"})
                     or dep["kind"] not in ("source", "entry", "binding")):
@@ -811,6 +936,8 @@ class LibraryStore:
                 raise ConflictError("任务资料选择历史已变化，旧任务不能复活")
             if dep["kind"] == "binding":
                 self._validate_binding(current)
+            if dep["kind"] == "entry":
+                self._validate_research_entry(current)
             if dep["kind"] == "source" and dep["scope"] == self.scope:
                 self._source_text(current)
         return copy.deepcopy(snapshot)
@@ -832,9 +959,72 @@ class LibraryStore:
                 or current["hash"] != expected["hash"] or current["withdrawn"] or current["status"] == "archived"):
             raise ConflictError("方法分析依赖已变化、归档或撤回，候选包未发布")
 
+    def preview_reference_methods(self, book_id, batch_id, node_id, method_indices):
+        if self.project is not None:
+            raise VibeNovelError("参考书研究方法须先发布个人库，再显式选用于本书")
+        return _preview_reference_methods(self.workspace, book_id, batch_id, node_id, method_indices)
+
+    def publish_reference_methods(self, book_id, batch_id, node_id, method_indices, expected_preview, idempotency_key):
+        if not isinstance(idempotency_key, str) or not re.fullmatch(r"[A-Za-z0-9_-]{16,80}", idempotency_key):
+            raise VibeNovelError("研究方法发布需要16至80位幂等键")
+        preview = self.preview_reference_methods(book_id, batch_id, node_id, method_indices)
+        if preview["hash"] != expected_preview:
+            raise ConflictError("研究方法范围、结果或授权已变化，请重新预览")
+        request_hash = digest(json_bytes({"preview_hash": expected_preview, "book_id": book_id, "batch_id": batch_id,
+                                          "node_id": node_id, "method_indices": method_indices}))
+        return self._publish_research_preview(preview, idempotency_key, request_hash)
+
+    def preview_study_methods(self, study_id, method_indices):
+        if self.project is not None:
+            raise VibeNovelError("精读研究方法先发布个人库，再由作者选入本书")
+        from .reference_studies import ReferenceStudiesStore
+        return ReferenceStudiesStore(self.workspace).preview_methods(study_id, method_indices)
+
+    def publish_study_methods(self, study_id, method_indices, expected_preview, idempotency_key):
+        preview = self.preview_study_methods(study_id, method_indices)
+        if preview["hash"] != expected_preview:
+            raise ConflictError("精读方法或来源已变化，请重新预览")
+        request_hash = digest(json_bytes({"study_id": study_id, "preview_hash": expected_preview,
+                                         "method_indices": method_indices}))
+        return self._publish_research_preview(preview, idempotency_key, request_hash)
+
+    def _publish_research_preview(self, preview, idempotency_key, request_hash):
+        if not isinstance(idempotency_key, str) or not re.fullmatch(r"[A-Za-z0-9_-]{16,80}", idempotency_key):
+            raise VibeNovelError("研究方法发布需要16至80位固定幂等键")
+        with self._locked() as state:
+            validate_research_origin(self.workspace, preview["origin"])
+            for identity in state["entities"]["bundle"]:
+                existing = self._read(state, "bundle", identity)
+                if existing.get("reference_idempotency_key") == idempotency_key:
+                    if existing["request_hash"] != request_hash or existing.get("research_origin") != preview["origin"]:
+                        raise ConflictError("方法发布幂等键已绑定另一研究选择")
+                    return self._bundle_result(state, existing)
+            changes, ids = [], []
+            for method in preview["methods"]:
+                data = self._entry_payload({"type": "method", "title": method["title"], "content": "参考书研究提炼的方法候选；文学效果待作者评阅。",
+                                           "tags": ["参考书研究"], "source_refs": [],
+                                           "method": {"purpose": preview["purpose"], "steps": method["steps"],
+                                                      "limitations": method["limitations"]}}, state, "AI_SUGGESTED")
+                origin = copy.deepcopy(preview["origin"])
+                if origin.get("source_type") != "reference_study":
+                    origin["method_indices"] = [method["index"]]
+                    origin["evidence"] = copy.deepcopy(method["source_refs"])
+                data.update(research_origin=origin, authorization_revision=uuid4().hex)
+                identity = uuid4().hex
+                changes.append(("entry", identity, data))
+                ids.append({"id": identity, "role": "method"})
+            bundle_id = uuid4().hex
+            changes.append(("bundle", bundle_id, {"job_id": None, "reference_idempotency_key": idempotency_key,
+                "request_hash": request_hash, "snapshot_hash": None, "task_snapshot": None, "expected_analysis": None,
+                "research_origin": copy.deepcopy(preview["origin"]), "entries": ids}))
+            records = self._commit(state, changes)
+            return self._bundle_result(self._state(), records[-1])
+
     def publish_method_bundle(self, bundle, task_snapshot=None, job_id=None, expected_analysis=None):
         if task_snapshot is not None:
             self._snapshot_store(task_snapshot).validate_task_snapshot(task_snapshot)
+            if any(dep.get("kind") in ("reference_research", "reference_retrieval") for dep in task_snapshot["typed_deps"]):
+                raise VibeNovelError("参考研究方法的再提炼尚无来源继承流程，请从原研究节点发布候选")
         if not isinstance(bundle, dict) or set(bundle) - {"analysis", "methods"} or not isinstance(bundle.get("methods", []), list) or len(bundle.get("methods", [])) > 20:
             raise VibeNovelError("方法候选包格式无效")
         if job_id is not None:
@@ -927,4 +1117,5 @@ class LibraryStore:
                 "request_hash": bundle["request_hash"], "snapshot_hash": bundle.get("snapshot_hash"),
                 "expected_analysis": bundle.get("expected_analysis"),
                 "analysis": next((e for role, e in entries if role == "analysis"), None),
-                "methods": [e for role, e in entries if role == "method"], "entries": [e for _, e in entries]}
+                "methods": [e for role, e in entries if role == "method"], "entries": [e for _, e in entries],
+                **({"research_origin": copy.deepcopy(bundle["research_origin"])} if bundle.get("research_origin") is not None else {})}

@@ -107,7 +107,8 @@ class ModelRegistry:
         profile = {"id": "default_api", "label": "现有 API", "base_url": settings.base_url,
                    "model": settings.model, "allow_loopback": settings.allow_loopback,
                    "roles": list(ROLES), "context_tokens": 1048576, "max_output_tokens": 8192,
-                   "price_input_usd": None, "price_output_usd": None, "api_key": settings.api_key}
+                   "price_input_usd": settings.price_input_usd,
+                   "price_output_usd": settings.price_output_usd, "api_key": settings.api_key}
         marker = digest(json_bytes({"profile": {key: val for key, val in profile.items() if key != "api_key"},
                                     "file_stamp": stamp}))
         return _profile(profile), marker
@@ -196,4 +197,5 @@ def resolve_snapshot(workspace, snapshot):
             raise SettingsError("任务绑定的模型配置已变化，请重新提交")
         return StudioSettings(base_url=profile["base_url"], model=profile["model"],
                               api_key=profile["api_key"], allow_loopback=profile["allow_loopback"],
-                              max_output_tokens=profile["max_output_tokens"])
+                              max_output_tokens=profile["max_output_tokens"],
+                              price_input_usd=profile["price_input_usd"], price_output_usd=profile["price_output_usd"])

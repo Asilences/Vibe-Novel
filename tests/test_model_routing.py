@@ -16,7 +16,7 @@ from vibenovel.core.project import ProjectStore
 from vibenovel.errors import VibeNovelError
 from vibenovel.studio.model_registry import ModelRegistry, REGISTRY_PATH, ROLES, resolve_snapshot
 from vibenovel.studio.routing import BudgetLedger, ProjectRouting
-from vibenovel.studio.settings import SettingsError
+from vibenovel.studio.settings import SettingsError, save_settings
 
 
 class ModelRoutingTests(unittest.TestCase):
@@ -74,6 +74,41 @@ class ModelRoutingTests(unittest.TestCase):
         self.assertEqual(resolve_snapshot(self.workspace, self.registry.snapshot("default_api")).api_key, "legacy-fixture-secret")
         with self.assertRaises(ConflictError):
             self.registry.migrate(None)
+
+    def test_single_api_prices_feed_routes_snapshots_and_explicit_migration(self):
+        saved = save_settings(self.workspace, {"base_url": "https://offline.invalid/v1", "model": "fixture-model",
+            "api_key": "legacy-priced-fixture-secret", "allow_loopback": False,
+            "price_input_usd": 1.25, "price_output_usd": 3.5}, None, {})
+        original = (self.workspace / "config/api.local.json").read_bytes()
+        route = self.routing.preview("draft", "待写场景")
+        candidate = route["candidates"][0]
+        self.assertEqual((candidate["price_input_usd"], candidate["price_output_usd"]), (1.25, 3.5))
+        self.assertFalse((self.workspace / REGISTRY_PATH).exists())
+        frozen = self.registry.snapshot("default_api")
+        self.assertEqual(resolve_snapshot(self.workspace, frozen).price_output_usd, 3.5)
+        self.assertNotIn("legacy-priced-fixture-secret", json.dumps(route))
+        self.assertEqual((self.workspace / "config/api.local.json").read_bytes(), original)
+        # Price drift invalidates frozen configuration before any invocation.
+        changed = save_settings(self.workspace, {"base_url": saved["api"]["base_url"], "model": saved["api"]["model"],
+            "allow_loopback": False, "price_input_usd": 2}, saved["hash"], {})
+        with self.assertRaises(SettingsError):
+            resolve_snapshot(self.workspace, frozen)
+        before_migration = (self.workspace / "config/api.local.json").read_bytes()
+        migrated = self.registry.migrate(None)
+        self.assertEqual(migrated["profiles"][0]["price_input_usd"], 2)
+        self.assertEqual(migrated["profiles"][0]["price_output_usd"], 3.5)
+        self.assertEqual((self.workspace / "config/api.local.json").read_bytes(), before_migration)
+        self.assertNotEqual(changed["hash"], saved["hash"])
+
+    def test_environment_changed_model_cannot_reuse_single_api_quotes(self):
+        save_settings(self.workspace, {"base_url": "https://offline.invalid/v1", "model": "fixture-model",
+            "api_key": "legacy-priced-fixture-secret", "allow_loopback": False,
+            "price_input_usd": 1.25, "price_output_usd": 3.5}, None, {})
+        with patch.dict(os.environ, {"VIBENOVEL_API_MODEL": "other-model"}):
+            route = self.routing.preview("draft", "正文")
+        self.assertEqual(route["candidates"][0]["model"], "other-model")
+        self.assertIsNone(route["candidates"][0]["price_input_usd"])
+        self.assertIsNone(route["candidates"][0]["price_output_usd"])
 
     def test_public_no_key_and_preserves_independent_credentials(self):
         public = self.registry.save({"profiles": [self.profile("first"), self.profile("second", api_key="other-fixture-secret")]}, None)

@@ -3,6 +3,8 @@
   "api": {
     "base_url": "https://api.deepseek.com",
     "model": "deepseek-flash",
-    "api_key": ""
+    "api_key": "",
+    "price_input_usd": null,
+    "price_output_usd": null
   }
 }

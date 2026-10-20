@@ -288,7 +288,7 @@ def assemble(workspace, project, kind, prompt, selection=None, query=""):
     if kind == "memory_delta":
         return prompt, None  # Candidate facts come only from the frozen prose.
     selection = {} if selection is None else copy.deepcopy(selection)
-    if not isinstance(selection, dict) or set(selection) - {"entry_ids", "source_ranges", "binding_ids", "query"}:
+    if not isinstance(selection, dict) or set(selection) - {"entry_ids", "source_ranges", "binding_ids", "query", "retrieval_selection"}:
         raise VibeNovelError("本次资料选择字段无效")
     # Do not create empty libraries merely by opening or submitting an old book.
     if not project.path("library/.state/manifest.json").exists() and not selection:
@@ -298,7 +298,7 @@ def assemble(workspace, project, kind, prompt, selection=None, query=""):
     library = store(workspace, project)
     overview = library.overview()
     policy = overview["policy"]
-    selected = any(selection.get(key) for key in ("entry_ids", "source_ranges", "binding_ids"))
+    selected = any(selection.get(key) for key in ("entry_ids", "source_ranges", "binding_ids", "retrieval_selection"))
     query = selection.get("query") or query[:200] or kind
     _text(query, "资料查询", 200)
     recommendations = []
@@ -310,6 +310,8 @@ def assemble(workspace, project, kind, prompt, selection=None, query=""):
                "binding_ids": selection.get("binding_ids", []), "source_ranges": selection.get("source_ranges", []),
                "query": query, "max_characters": 24000,
                "automatic": policy["mode"] == "auto" and purpose in policy["purposes"]}
+    if selection.get("retrieval_selection") is not None:
+        payload["retrieval_selection"] = selection["retrieval_selection"]
     if not selected and not payload["automatic"]:
         return prompt, None
     snapshot = library.select_for_task(payload)

@@ -606,6 +606,7 @@ h3 {
   flex-direction: column;
   overflow: hidden;
   min-width: 0;
+  min-height: 0;
 }
 .sidebar nav { overflow-y: auto; min-height: 160px; flex: 0 1 auto; scrollbar-width: thin; }
 .sidebar:has(.file-browser) nav { max-height: 49%; flex-shrink: 0; }
@@ -919,9 +920,17 @@ nav {
   overflow: hidden;
   position: relative;
 }
+/* Each page owns the space below the fixed toolbar. Without this constraint,
+   long flex children keep their content height and are clipped by workspace. */
+.workspace > :not(.workspace-bar):not(.editor-workspace) {
+  flex: 1 1 0%;
+  min-height: 0;
+  overflow: auto;
+}
 .workspace-bar {
   height: 48px;
   min-height: 48px;
+  flex-shrink: 0;
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -1422,6 +1431,7 @@ nav {
   background: #fdfdfd;
   border-left: 1px solid var(--line);
   min-width: 0;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -1466,6 +1476,7 @@ nav {
 .agent-scroll {
   overflow: auto;
   flex: 1;
+  min-height: 0;
   padding: 25px 21px 20px;
   display: flex;
   flex-direction: column;

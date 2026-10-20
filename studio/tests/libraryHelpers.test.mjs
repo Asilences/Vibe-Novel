@@ -5,7 +5,41 @@ import ts from "typescript";
 
 const source = await readFile(new URL("../src/libraryHelpers.ts", import.meta.url), "utf8");
 const { outputText } = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2022 } });
-const { bytesBase64, emptyLibraryEntry, entryPayload, libraryPreviewHash, libraryTaskConfiguration, methodContent, sourceExcerpt, sourceLineAt, sourceReference } = await import(`data:text/javascript;base64,${Buffer.from(outputText).toString("base64")}`);
+const { bytesBase64, emptyLibraryEntry, entryPayload, libraryPreviewHash, libraryTaskConfiguration, libraryViewForScope, librarySearchExcerpt, methodContent, sourceExcerpt, sourceLineAt, sourceReference } = await import(`data:text/javascript;base64,${Buffer.from(outputText).toString("base64")}`);
+
+test("search excerpts expose relevant method prose and evidence without serialized storage fields", () => {
+  const method = { ...emptyLibraryEntry("method"), id: "method", version_id: "fixed", summary: "通用方法摘要", content: JSON.stringify({ method: { purpose: "表达练习", steps: ["写清人物的选择与代价。"] }, source_cases: [{ description: "保留动作顺序。", source_refs: [{ source_id: "private-id" }] }], analysis_identity: { id: "hidden" } }), source_refs: [{ quote: "他放下车票，转身回家。", source_id: "private-id" }] };
+  const overview = { entries: [method], bindings: [] };
+  const hit = { kind: "entry", id: "method", version_id: "fixed", quote: method.content };
+  assert.match(librarySearchExcerpt(hit, overview, "选择与代价"), /写清人物的选择与代价/);
+  assert.equal(librarySearchExcerpt(hit, overview, "放下车票"), "原文依据：他放下车票，转身回家。");
+  const analysis = { ...method, id: "analysis", content: JSON.stringify({ observations: [{ title: "情节安排", observation: "人物选择改变冲突的走向。", source_refs: [{ source_id: "private-id", start_char: 18 }] }] }), source_refs: [] };
+  const result = librarySearchExcerpt({ ...hit, id: "analysis" }, { ...overview, entries: [analysis] }, "选择");
+  assert.match(result, /人物选择改变冲突/);
+  for (const hidden of ["source_id", "private-id", "start_char", "observations", "{"]) assert.equal(result.includes(hidden), false);
+});
+
+test("search does not attribute a current card's excerpt to an older result version", () => {
+  const current = { ...emptyLibraryEntry(), id: "card", version_id: "new", summary: "新版本内容不该用于旧证据" };
+  const result = librarySearchExcerpt({ kind: "entry", id: "card", version_id: "old", quote: '{"source_id":"private"}' }, { entries: [current], bindings: [] }, "内容");
+  assert.match(result, /打开固定版本/);
+  assert.equal(result.includes("新版本"), false);
+  assert.equal(result.includes("source_id"), false);
+});
+
+test("personal and projectless libraries cannot retain book binding or policy views", () => {
+  for (const view of ["bindings", "policy"]) {
+    assert.equal(libraryViewForScope(view, "book", true), view);
+    assert.equal(libraryViewForScope(view, "personal", true), "all");
+    assert.equal(libraryViewForScope(view, "book", false), "all");
+    const personalView = libraryViewForScope(view, "personal", true);
+    assert.equal(libraryViewForScope(personalView, "book", true), "all");
+  }
+  for (const view of ["sources", "method", "books", "retrieval", "studies", "account", "collections"]) {
+    assert.equal(libraryViewForScope(view, "personal", true), view);
+    assert.equal(libraryViewForScope(view, "book", false), view);
+  }
+});
 
 test("source excerpts preserve original CRLF and Unicode codepoint ranges", () => {
   const text = "甲😀\r\n乙\n尾";
@@ -63,4 +97,13 @@ test("editing a generated method sends one consistent structure in its evidence 
   const payload = entryPayload(entry);
   assert.deepEqual(JSON.parse(payload.content).method, payload.method);
   assert.deepEqual(JSON.parse(payload.content).source_cases, original.source_cases);
+});
+
+test("editing a reference research method retains read-only origin without forging ordinary source refs", () => {
+  const origin = {book_id: "book", edition_id: "original-edition", batch_id: "batch", node_id: "chapter-00001", result_hash: "frozen", evidence: [{chapter_id: "chapter", start_char: 1, end_char: 3, quote: "原句"}]};
+  const entry = {...emptyLibraryEntry("method"), id: "candidate", research_origin: origin, title: "作者修正标题", source_refs: [], adopted: true};
+  const payload = entryPayload(entry);
+  assert.deepEqual(payload.research_origin, origin);
+  assert.deepEqual(payload.source_refs, []);
+  assert.equal("adopted" in payload, false);
 });

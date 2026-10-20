@@ -268,13 +268,14 @@ class StudioCoreTests(unittest.TestCase):
                   "DocumentStore(p).save('drafts/from-process.md','child',None)")
         env = dict(os.environ)
         env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src")
+        env["PYTHONIOENCODING"] = "utf-8"
         with project_lock(self.project):
             result = subprocess.run([sys.executable, "-c", script, str(self.workspace)], env=env,
-                                    capture_output=True, text=True, timeout=20)
+                                    capture_output=True, encoding="utf-8", timeout=20)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("ConflictError", result.stderr)
         result = subprocess.run([sys.executable, "-c", script, str(self.workspace)], env=env,
-                                capture_output=True, text=True, timeout=20)
+                                capture_output=True, encoding="utf-8", timeout=20)
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_apply_recovery_at_each_persistence_boundary_consumes_approval_once(self):

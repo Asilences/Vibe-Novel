@@ -83,7 +83,8 @@ class OpenAICompatibleProvider:
     """OpenAI-compatible chat completions; no tool calling or automatic retry."""
 
     def __init__(self, environment: Optional[Mapping[str, str]] = None, *, timeout: float = 30,
-                 workspace: Optional[Path] = None, settings: Optional[StudioSettings] = None):
+                 workspace: Optional[Path] = None, settings: Optional[StudioSettings] = None,
+                 thinking: Optional[str] = None):
         if workspace is not None:
             settings = load_settings(workspace, environment)
         if settings is None:
@@ -100,6 +101,9 @@ class OpenAICompatibleProvider:
             raise ProviderError("API 环境配置含无效控制字符")
         self._timeout = timeout
         self._max_output_tokens = settings.max_output_tokens
+        if thinking not in (None, "enabled", "disabled"):
+            raise ProviderError("研究思考模式无效", billing="not_sent")
+        self._thinking = thinking
 
     def generate(self, prompt: str, cancel: threading.Event) -> GenerationResult:
         if cancel.is_set():
@@ -116,6 +120,8 @@ class OpenAICompatibleProvider:
             if type(self._max_output_tokens) is not int or not 1 <= self._max_output_tokens <= 131072:
                 raise ProviderError("API 输出上限无效", billing="not_sent")
             payload["max_tokens"] = self._max_output_tokens
+        if self._thinking is not None:
+            payload["thinking"] = {"type": self._thinking}
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         request = urllib.request.Request(self._endpoint, body, {
             "Authorization": "Bearer " + self._key,

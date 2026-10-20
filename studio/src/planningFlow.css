@@ -1,0 +1,20 @@
+.planning-next-step,
+.creation-next-step {
+  padding: 16px 18px;
+  margin: 0 0 18px;
+  border: 1px solid #dce3ed;
+  border-radius: 8px;
+  background: #f5f7fb;
+  color: #5d6c85;
+  font-size: 12px;
+  line-height: 1.8;
+}
+.planning-next-step h2,
+.creation-next-step h2 { margin: 0 0 5px; font-size: 14px; color: #485873; }
+.planning-next-step p,
+.creation-next-step p { margin: 4px 0 10px; }
+.planning-next-step { padding: 10px 14px; margin-bottom: 10px; }
+.planning-next-step p { margin: 0; }
+.creation-next-step .button { margin-right: 8px; }
+.planning-generator-status { margin-top: 10px; font-size: 11px; line-height: 1.8; color: #697990; }
+.planning-package-toolbar-actions { display: flex; gap: 8px; align-items: center; }

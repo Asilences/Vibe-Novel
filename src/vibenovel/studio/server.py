@@ -46,6 +46,13 @@ from .model_registry import ModelRegistry
 from .routing import ProjectRouting
 from .workflows import WorkflowManager
 from .library_api import install_library_routes
+from .reference_api import install_reference_routes, MAX_BOOK_REQUEST_BYTES
+from .reference_studies import install_study_routes
+from .reference_editions_api import install_edition_routes
+from .reference_retrieval_api import install_reference_retrieval_routes
+from .research_api import install_research_routes
+from .reference_evaluations_api import install_evaluation_routes
+from vibenovel.core.research_gateway import ResearchGateway
 
 MAX_REQUEST_BYTES = 15 * 1024 * 1024
 LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
@@ -161,6 +168,8 @@ class APISettings(Input):
     api_key: StrictStr = Field(default="", max_length=16384)
     clear_api_key: bool = False
     allow_loopback: bool = False
+    price_input_usd: Optional[float] = Field(default=None, ge=0, le=1_000_000, allow_inf_nan=False)
+    price_output_usd: Optional[float] = Field(default=None, ge=0, le=1_000_000, allow_inf_nan=False)
 
 
 class SaveSettings(Input):
@@ -314,9 +323,14 @@ class LocalBoundary:
                 return await reject(403, "请求令牌已过期，请刷新 Studio")
             if headers.get("content-type", "").split(";", 1)[0].lower() != "application/json":
                 return await reject(415, "请使用 JSON 请求")
+        # Only the dedicated reference-book import accepts a larger body. All
+        # other document, model and library endpoints keep their old boundary.
+        book_upload = scope["method"] == "POST" and scope.get("path") == "/api/reference-books/import"
+        request_limit = MAX_BOOK_REQUEST_BYTES if book_upload else MAX_REQUEST_BYTES
+        size_message = "参考书导入请求超过128MiB原件的传输上限" if book_upload else "请求超过 15 MiB 上限"
         try:
-            if int(headers.get("content-length", "0")) > MAX_REQUEST_BYTES:
-                return await reject(413, "请求超过 15 MiB 上限")
+            if int(headers.get("content-length", "0")) > request_limit:
+                return await reject(413, size_message)
         except ValueError:
             return await reject(400, "Content-Length 无效")
         # Buffer only bounded local requests. This prevents chunked uploads
@@ -329,8 +343,8 @@ class LocalBoundary:
                 return
             body = message.get("body", b"")
             total += len(body)
-            if total > MAX_REQUEST_BYTES:
-                return await reject(413, "请求超过 15 MiB 上限")
+            if total > request_limit:
+                return await reject(413, size_message)
             parts.append(body)
             if not message.get("more_body", False):
                 break
@@ -372,6 +386,10 @@ def create_app(workspace: Path, *, frontend_dir: Optional[Path] = None, job_mana
         try:
             yield
         finally:
+            app.state.reference_batches.close()
+            app.state.reference_studies.close()
+            app.state.reference_retrieval.close()
+            app.state.reference_evaluations.close()
             jobs.close()
 
     app = FastAPI(title="VibeNovel Studio", version=__version__, lifespan=lifespan,
@@ -380,6 +398,13 @@ def create_app(workspace: Path, *, frontend_dir: Optional[Path] = None, job_mana
     app.state.workspace = store.workspace
     app.add_middleware(LocalBoundary, token=token)
     install_library_routes(app, store.workspace, store)
+    app.state.reference_batches = install_reference_routes(app, store.workspace, store, jobs)
+    app.state.research_gateway = ResearchGateway(store.workspace)
+    app.state.reference_studies = install_study_routes(app, store.workspace, app.state.research_gateway)
+    app.state.reference_retrieval = install_reference_retrieval_routes(app, store.workspace, store)
+    install_edition_routes(app, store.workspace)
+    install_research_routes(app, store.workspace, app.state.research_gateway)
+    app.state.reference_evaluations = install_evaluation_routes(app, store.workspace, app.state.research_gateway)
 
     @app.exception_handler(ConflictError)
     async def conflict_error(request, exc):
@@ -423,7 +448,8 @@ def create_app(workspace: Path, *, frontend_dir: Optional[Path] = None, job_mana
 
     @app.put("/api/settings")
     def update_api_settings(body: SaveSettings):
-        return save_settings(store.workspace, body.api.model_dump(), body.expected_hash)
+        omitted_prices = {"price_input_usd", "price_output_usd"} - body.api.model_fields_set
+        return save_settings(store.workspace, body.api.model_dump(exclude=omitted_prices), body.expected_hash)
 
     @app.get("/api/model-registry")
     def model_registry():

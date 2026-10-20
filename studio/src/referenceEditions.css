@@ -1,0 +1,20 @@
+.reference-editions { padding:24px; min-width:0; display:flex; flex-direction:column; gap:18px; }
+.editions-header { display:flex; gap:18px; align-items:center; flex-wrap:wrap; }
+.editions-header h2,.editions-header p { margin:0 0 5px; }
+.editions-explainer,.editions-notice { padding:14px 18px; background:var(--surface-raised,#f3f6f8); border:1px solid var(--border,#dce1e5); border-radius:10px; }
+.editions-explainer { display:flex; align-items:flex-start; gap:12px; }
+.editions-explainer p { margin:0; }
+.editions-toolbar,.editions-row-actions,.editions-inline { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.reference-editions button { display:inline-flex; align-items:center; justify-content:center; gap:6px; }
+.editions-field { display:flex; flex-direction:column; gap:7px; }
+.editions-table-wrap { overflow-x:auto; border:1px solid var(--border,#dce1e5); border-radius:10px; }
+.reference-editions table { width:100%; min-width:740px; border-collapse:collapse; }
+.reference-editions td,.reference-editions th { text-align:left; padding:9px; vertical-align:top; border-bottom:1px solid var(--border,#e4e8eb); }
+.reference-editions td input { display:block; width:100%; min-width:160px; margin-bottom:5px; }
+.reference-editions pre { white-space:pre-wrap; overflow-wrap:anywhere; max-height:340px; overflow:auto; padding:12px; background:var(--surface-raised,#f4f6f8); border-radius:8px; font-size:12px; }
+.reference-editions textarea { width:100%; resize:vertical; font-family:monospace; }
+.editions-preview { padding:18px; border:1px solid var(--border,#dce1e5); border-radius:10px; display:flex; flex-direction:column; gap:10px; }
+.editions-preview input[type=checkbox] { width:auto; margin-right:8px; }
+.editions-candidate { display:flex !important; flex-direction:column; align-items:flex-start !important; width:100%; margin-bottom:7px; padding:12px; text-align:left; }
+.editions-candidate small { opacity:.65; }
+@media(max-width:700px){.reference-editions{padding:14px}.editions-header{gap:10px}.editions-toolbar>*{max-width:100%}}

@@ -1,10 +1,62 @@
-import type { LibraryEntry, LibraryMethod, LibrarySourceRef } from "./api";
+import type { LibraryEntry, LibraryMethod, LibraryOverview, LibraryScope, LibrarySourceRef } from "./api";
+
+export function libraryViewForScope<T extends string>(view: T, scope: LibraryScope, hasProject: boolean): T | "all" {
+  return (scope !== "book" || !hasProject) && (view === "bindings" || view === "policy") ? "all" : view;
+}
+
+const readableFields: Record<string, string> = {
+  title: "", summary: "摘要", content: "整理", purpose: "用途", steps: "步骤", inputs: "输入", outputs: "输出",
+  limitations: "边界", applies_to: "适用情境", counterexamples: "反例", checks: "检查", description: "说明",
+  observation: "观察", rationale: "依据", prompt: "合成练习", expected: "预期观察", gaps: "待补资料",
+  method: "方法", reading_map: "阅读地图", observations: "结构观察", directions: "可提炼方向", references: "普通参考",
+  source_cases: "原书案例", synthetic_exercises: "合成练习", checks_status: "核对状态",
+};
+
+// Search quotes also contain serialized storage metadata. Render only reading
+// content from the matching fixed version; provenance remains in its detail view.
+function readableContent(value: unknown, label = ""): string[] {
+  if (typeof value === "string") return value.trim() ? [label ? `${label}：${value}` : value] : [];
+  if (Array.isArray(value)) return value.flatMap((item) => readableContent(item, label));
+  if (!value || typeof value !== "object") return [];
+  return Object.entries(value).flatMap(([key, item]) => key in readableFields ? readableContent(item, readableFields[key]) : []);
+}
+
+function contentLines(entry: LibraryEntry): string[] {
+  let content: unknown = entry.content;
+  try { content = JSON.parse(entry.content); } catch { /* Author prose is already readable. */ }
+  return [...new Set([
+    ...readableContent(entry.summary), ...readableContent(content), ...readableContent(entry.method),
+    ...entry.source_refs.flatMap((ref) => ref.quote ? [`原文依据：${ref.quote}`] : []),
+  ])];
+}
+
+function matchingExcerpt(lines: string[], query: string): string {
+  const wanted = query.trim().toLocaleLowerCase();
+  const terms = (wanted.match(/[a-z0-9_]+|[\u3400-\u9fff]+/g) || []).flatMap((word) => /^[\u3400-\u9fff]/.test(word) && word.length > 1 ? Array.from({ length: word.length - 1 }, (_, index) => word.slice(index, index + 2)) : [word]);
+  let best = lines[0] || "", bestScore = -1, offset = 0;
+  for (const line of lines) {
+    const lower = line.toLocaleLowerCase(), exact = wanted ? lower.indexOf(wanted) : -1;
+    const matches = terms.filter((term) => lower.includes(term));
+    const score = (exact >= 0 ? 1000 : 0) + matches.length;
+    if (score > bestScore) { best = line; bestScore = score; offset = exact >= 0 ? exact : matches.length ? Math.min(...matches.map((term) => lower.indexOf(term))) : 0; }
+  }
+  const start = Math.max(0, Array.from(best.slice(0, offset)).length - 45), chars = Array.from(best);
+  return `${start ? "…" : ""}${chars.slice(start, start + 200).join("")}${chars.length > start + 200 ? "…" : ""}`;
+}
+
+export function librarySearchExcerpt(hit: Record<string, unknown>, overview: LibraryOverview, query: string): string {
+  if (hit.kind === "source") return Array.from(typeof hit.quote === "string" ? hit.quote : "").slice(0, 200).join("");
+  const binding = hit.kind === "binding" ? overview.bindings.find((item) => item.id === hit.id && item.version_id === hit.version_id) : undefined;
+  const entry = hit.kind === "entry" ? overview.entries.find((item) => item.id === hit.id && item.version_id === hit.version_id) : binding?.snapshot || binding?.entry;
+  if (!entry) return "命中此资料；打开固定版本查看正文与出处。";
+  return matchingExcerpt(contentLines(entry), query) || "打开固定版本查看整理内容与出处。";
+}
 
 export const emptyMethod = (): LibraryMethod => ({ purpose: "", steps: [], inputs: [], outputs: [], limitations: [], applies_to: [], counterexamples: [], checks: [] });
 export const emptyLibraryEntry = (type: LibraryEntry["type"] = "material"): LibraryEntry => ({ id: "", type, title: "", content: "", tags: [], summary: "", outbound: "local", status: "inbox", verification: "unverified", provenance: "AUTHOR", source_refs: [], ...(type === "method" ? { method: emptyMethod() } : {}), hash: "", version_id: "", revision: 0 });
 
 export function entryPayload(entry: LibraryEntry): Record<string, unknown> {
-  return { ...(entry.id ? { id: entry.id } : {}), type: entry.type, title: entry.title, content: methodContent(entry) ? JSON.stringify({ ...methodContent(entry), method: entry.method || emptyMethod() }) : entry.content, tags: entry.tags, summary: entry.summary, outbound: entry.outbound, status: entry.status, verification: entry.verification, provenance: entry.provenance, withdrawn: !!entry.withdrawn, withdrawal_reason: entry.withdrawal_reason || "", source_refs: entry.source_refs, ...(entry.type === "method" ? { method: entry.method || emptyMethod() } : {}), ...(entry.analysis ? { analysis: entry.analysis } : {}) };
+  return { ...(entry.id ? { id: entry.id } : {}), type: entry.type, title: entry.title, content: methodContent(entry) ? JSON.stringify({ ...methodContent(entry), method: entry.method || emptyMethod() }) : entry.content, tags: entry.tags, summary: entry.summary, outbound: entry.outbound, status: entry.status, verification: entry.verification, provenance: entry.provenance, withdrawn: !!entry.withdrawn, withdrawal_reason: entry.withdrawal_reason || "", source_refs: entry.source_refs, ...(entry.type === "method" ? { method: entry.method || emptyMethod() } : {}), ...(entry.analysis ? { analysis: entry.analysis } : {}), ...(entry.research_origin ? { research_origin: entry.research_origin } : {}) };
 }
 
 export function sourceExcerpt(text: string, start: number, end: number): string {

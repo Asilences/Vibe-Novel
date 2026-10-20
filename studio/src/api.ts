@@ -56,13 +56,14 @@ export type Job = {
   created_at: string;
   result_path?: string;
   error?: string;
-  request?: { instruction?: string; document_path?: string; document_hash?: string; document_version_id?: string; selection?: { start_char: number; end_char: number }; editorial?: { goals: string[]; intensity: "conservative" | "standard" | "deep" } };
+  request?: { instruction?: string; document_path?: string; document_hash?: string; document_version_id?: string; planning_start?: number; planning_count?: number; library_selection?: Record<string, unknown>; plan_path?: string; brief_mode?: "compact" | "full"; selection?: { start_char: number; end_char: number }; editorial?: { goals: string[]; intensity: "conservative" | "standard" | "deep" } };
   logs?: Array<string | Record<string, unknown>>;
   usage?: Record<string, unknown> | null;
   cost_usd?: number | null;
   route?: Record<string, unknown> | null;
   attempts?: Array<Record<string, unknown>>;
   budget_summary?: Record<string, unknown> | null;
+  workflow_id?: string | null;
   context_sources?: Record<string, string>;
   recovery_available?: boolean;
   recovery_candidate?: string;
@@ -84,7 +85,7 @@ export type LibraryEntry = {
   outbound: LibraryOutbound; status: "inbox" | "ready" | "archived";
   verification: "unverified" | "checked" | "disputed" | "needs_evidence";
   provenance: "AUTHOR" | "AI_SUGGESTED"; source_refs: LibrarySourceRef[]; method?: LibraryMethod;
-  analysis?: Record<string, unknown>; adopted?: boolean; adoption?: Record<string, unknown> | null;
+  analysis?: Record<string, unknown>; research_origin?: Record<string, unknown>; adopted?: boolean; adoption?: Record<string, unknown> | null;
   version_id: string; hash: string; revision: number; created_at?: string; updated_at?: string;
   [key: string]: unknown;
 };
@@ -325,7 +326,7 @@ export type AnalysisStructure = {
 export type APISettingsData = {
   hash: string | null;
   default_provider: "api";
-  api: { base_url: string; model: string; has_api_key: boolean; allow_loopback: boolean };
+  api: { base_url: string; model: string; has_api_key: boolean; allow_loopback: boolean; price_input_usd: number | null; price_output_usd: number | null };
   environment_overrides: string[];
   presets: { id: string; label: string; base_url: string; models: { id: string; label: string }[] }[];
 };
