@@ -56,13 +56,14 @@ export type Job = {
   created_at: string;
   result_path?: string;
   error?: string;
-  request?: { instruction?: string; document_path?: string; document_hash?: string; document_version_id?: string; selection?: { start_char: number; end_char: number }; editorial?: { goals: string[]; intensity: "conservative" | "standard" | "deep" } };
+  request?: { instruction?: string; document_path?: string; document_hash?: string; document_version_id?: string; planning_start?: number; planning_count?: number; library_selection?: Record<string, unknown>; plan_path?: string; brief_mode?: "compact" | "full"; selection?: { start_char: number; end_char: number }; editorial?: { goals: string[]; intensity: "conservative" | "standard" | "deep" } };
   logs?: Array<string | Record<string, unknown>>;
   usage?: Record<string, unknown> | null;
   cost_usd?: number | null;
   route?: Record<string, unknown> | null;
   attempts?: Array<Record<string, unknown>>;
   budget_summary?: Record<string, unknown> | null;
+  workflow_id?: string | null;
   context_sources?: Record<string, string>;
   recovery_available?: boolean;
   recovery_candidate?: string;

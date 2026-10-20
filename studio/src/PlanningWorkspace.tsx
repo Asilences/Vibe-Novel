@@ -47,6 +47,18 @@ import { Empty, IconButton, Modal } from "./ui";
 import { libraryPreviewHash, libraryTaskConfiguration } from "./libraryHelpers";
 import { JobRouteDetails } from "./MultiModelWorkspace";
 import TaskMaterialPreview from "./TaskMaterialPreview";
+import TaskMaterialPicker from "./TaskMaterialPicker";
+import { referenceUsedBySelection, retireReferenceRetrieval, taskReferenceIdentity } from "./taskReferenceHelpers";
+import "./planningFlow.css";
+
+export type PlanningFormDraft = {
+  sourcePath: string;
+  start: number;
+  count: number;
+  instruction: string;
+  materialSelection: Record<string, unknown> | null;
+  materialReference?: TaskReference;
+};
 
 type Props = {
   project: Project;
@@ -61,10 +73,13 @@ type Props = {
   onSource: (path: string, line?: number) => void;
   initialPath?: string;
   initialSourcePath?: string;
+  initialDraft?: PlanningFormDraft;
   initialTab?: Tab;
   onDirtyChange?: (dirty: boolean) => void;
   onImport?: () => void;
   onPaste?: () => void;
+  onCreation?: () => void;
+  onLibrary?: (draft: PlanningFormDraft) => void;
 };
 type Tab =
   | "overview"
@@ -348,25 +363,39 @@ export default function PlanningWorkspace({
   onSource,
   initialPath,
   initialSourcePath,
+  initialDraft,
   initialTab,
   onDirtyChange,
   onImport,
   onPaste,
+  onCreation,
+  onLibrary,
 }: Props) {
   const taskReference = useTaskReference(project.novel_id);
-  const [sourcePath, setSourcePath] = useState(initialSourcePath || "");
-  const [start, setStart] = useState(1);
-  const [count, setCount] = useState(3);
-  const [instruction, setInstruction] = useState("");
+  const [materialSelection, setMaterialSelection] = useState<Record<string, unknown> | null>(initialDraft?.materialSelection ?? null);
+  const previousReference = useRef<TaskReference>(initialDraft?.materialReference === undefined ? taskReference.ticket : initialDraft.materialReference);
+  const currentMaterialSelection = retireReferenceRetrieval(materialSelection, previousReference.current, taskReference.ticket);
+  const effectiveMaterials = currentMaterialSelection ?? taskReference.selection;
+  const referenceIdentity = taskReferenceIdentity(taskReference.ticket);
+  useEffect(() => {
+    const previous = previousReference.current;
+    previousReference.current = taskReference.ticket;
+    setMaterialSelection((current) => retireReferenceRetrieval(current, previous, taskReference.ticket));
+  }, [referenceIdentity]);
+  const [sourcePath, setSourcePath] = useState(initialDraft?.sourcePath ?? initialSourcePath ?? "");
+  const [start, setStart] = useState(initialDraft?.start ?? 1);
+  const [count, setCount] = useState(initialDraft?.count ?? 3);
+  const [instruction, setInstruction] = useState(initialDraft?.instruction ?? "");
   const [packages, setPackages] = useState<PlanningPackageSummary[]>([]);
   const [selectedPath, setSelectedPath] = useState(initialPath || "");
   const [selected, setSelected] = useState<PlanningPackage | null>(null);
   const [tab, setTab] = useState<Tab>(initialTab || "overview");
+  const [generatorOpen, setGeneratorOpen] = useState(!initialTab || initialTab === "overview");
   const [loading, setLoading] = useState(false);
   const [loadingPackage, setLoadingPackage] = useState(false);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
-  const [taskPreview, setTaskPreview] = useState<{ request: Record<string, unknown>; route: Record<string, unknown>; reference: TaskReference } | null>(null);
+  const [taskPreview, setTaskPreview] = useState<{ request: Record<string, unknown>; route: Record<string, unknown>; reference: TaskReference; identity: string } | null>(null);
   const [editing, setEditing] = useState<{
     path: string;
     hash: string;
@@ -379,6 +408,9 @@ export default function PlanningWorkspace({
   const selectedPathRef = useRef(selectedPath);
   selectedPathRef.current = selectedPath;
   const lastExtraction = useRef("");
+  const generatorRef = useRef<HTMLDetailsElement>(null);
+  const sourceRef = useRef<HTMLSelectElement>(null);
+  const packagesRef = useRef<HTMLElement>(null);
   const base = projectUrl(project.novel_id);
   const sources = useMemo(
     () =>
@@ -394,6 +426,9 @@ export default function PlanningWorkspace({
     [documents],
   );
   const source = sources.find((item) => item.path === sourcePath);
+  const taskIdentity = JSON.stringify([source?.path, source?.hash, start, count, instruction, effectiveMaterials, taskReference.ticket?.id]);
+  const taskIdentityRef = useRef(taskIdentity); taskIdentityRef.current = taskIdentity;
+  useEffect(() => { setTaskPreview(null); }, [taskIdentity]);
   const selectedProvider = providers.find((item) => item.id === "api");
   const blueprintJobs = jobs.filter((job) => job.kind === "build_blueprint");
   const latestJob = blueprintJobs[0];
@@ -423,9 +458,10 @@ export default function PlanningWorkspace({
       ));
 
   useEffect(() => { if (initialTab) setTab(initialTab); }, [initialTab]);
-  useEffect(() => { if (initialSourcePath) setSourcePath(initialSourcePath); }, [initialSourcePath]);
+  useEffect(() => { if (!loading && !packages.length) setGeneratorOpen(true); }, [loading, packages.length, initialTab]);
+  useEffect(() => { if (!initialDraft && initialSourcePath) setSourcePath(initialSourcePath); }, [initialSourcePath, initialDraft]);
   const onDirtyRef = useRef(onDirtyChange); onDirtyRef.current = onDirtyChange;
-  const formDirty = (!!editing && editText !== editing.content) || !!instruction.trim() || start !== 1 || count !== 3;
+  const formDirty = (!!editing && editText !== editing.content) || !!instruction.trim() || start !== 1 || count !== 3 || materialSelection !== null;
   useEffect(() => { onDirtyRef.current?.(formDirty); }, [formDirty]);
   useEffect(() => () => { onDirtyRef.current?.(false); }, []);
 
@@ -519,9 +555,10 @@ export default function PlanningWorkspace({
       return;
     setBusy("generate");
     setError("");
+    const identity = taskIdentity;
     try {
       const request = {
-        ...(taskReference.selection ? {library_selection:taskReference.selection}:{}),
+        ...(effectiveMaterials ? {library_selection:effectiveMaterials}:{}),
         kind: "build_blueprint",
         provider: "api",
         document_path: source.path,
@@ -532,8 +569,8 @@ export default function PlanningWorkspace({
         idempotency_key: crypto.randomUUID(),
       };
       const route = await api<Record<string, unknown>>(`${base}/jobs/preview`, "POST", request);
-      if (!alive.current) return;
-      setTaskPreview({ request, route, reference:taskReference.ticket });
+      if (!alive.current || taskIdentityRef.current !== identity) return;
+      setTaskPreview({ request, route, reference:referenceUsedBySelection(taskReference.ticket, effectiveMaterials), identity });
     } catch (failure) {
       if (alive.current) {
         setError(message(failure));
@@ -544,7 +581,7 @@ export default function PlanningWorkspace({
     }
   }
   async function submitPreview() {
-    if (!taskPreview || busy) return;
+    if (!taskPreview || taskPreview.identity !== taskIdentity || busy) return;
     setBusy("submit"); setError("");
     try {
       const job = await api<Job>(`${base}/jobs`, "POST", { ...taskPreview.request,
@@ -621,9 +658,16 @@ export default function PlanningWorkspace({
   const stateText = selected?.approved
     ? "已应用的规划包"
     : "候选规划 · 待作者审阅";
+  function openGenerator() {
+    setGeneratorOpen(true);
+    requestAnimationFrame(() => {
+      generatorRef.current?.scrollIntoView({ block: "start", behavior: "smooth" });
+      sourceRef.current?.focus({ preventScroll: true });
+    });
+  }
   return (
     <div className="planning-workspace scroll-area">
-      {taskPreview && <Modal title="创作规划任务预览" subtitle="核对模型、预算与实际补充资料，确认后才调用 API。" wide onClose={() => { if (!busy) setTaskPreview(null); }}><p>来源：{String(taskPreview.request.document_path)}；计划 {String(taskPreview.request.planning_start)} 起的 {String(taskPreview.request.planning_count)} 章。</p><JobRouteDetails route={taskPreview.route} /><TaskMaterialPreview route={taskPreview.route} />{error && <p className="inline-error">{error}；提交不确定时请先核对任务记录，重试沿用同一幂等键。</p>}<div className="modal-footer"><button type="button" className="button primary" disabled={!!busy || !libraryTaskConfiguration(taskPreview.route)} onClick={() => void submitPreview()}>确认并生成候选规划</button></div></Modal>}
+      {taskPreview && <Modal title="规划包生成预览" subtitle="核对模型、预算与实际补充资料，确认后才调用 API。" wide onClose={() => { if (!busy) setTaskPreview(null); }}><p>来源：{String(taskPreview.request.document_path)}；计划 {String(taskPreview.request.planning_start)} 起的 {String(taskPreview.request.planning_count)} 章。</p><JobRouteDetails route={taskPreview.route} /><TaskMaterialPreview route={taskPreview.route} onChangeMaterials={() => { setTaskPreview(null); requestAnimationFrame(() => document.getElementById("planning-task-materials")?.scrollIntoView({ block: "center", behavior: "smooth" })); }} />{error && <p className="inline-error">{error}；提交不确定时请先核对任务记录，重试沿用同一幂等键。</p>}<div className="modal-footer"><button type="button" className="button primary" disabled={!!busy || !libraryTaskConfiguration(taskPreview.route)} onClick={() => void submitPreview()}>确认并生成规划包（付费）</button></div></Modal>}
       <div className="page-heading compact-heading">
         <div>
           <div className="eyebrow">BLUEPRINT BEFORE THE FIRST WORD</div>
@@ -634,10 +678,13 @@ export default function PlanningWorkspace({
           <GitBranch size={26} strokeWidth={1.4} />
         </div>
       </div>
-      <details className="planning-generate-toggle" open={!initialTab || initialTab === "overview"}>
-      <summary>导入大纲与生成规划</summary>
+      {!loading && !packages.length && <section className="planning-next-step" aria-label="规划包创建指引">
+        <p><strong>创建流程：</strong>选择大纲 → 设置本批章节 → 预览规划包 → 确认生成 → 审阅并审批。规划包包含卷章、人物、伏笔、时间线、设定与文风；章计划仍须单独批准。</p>
+      </section>}
+      <details ref={generatorRef} className="planning-generate-toggle" open={generatorOpen} onToggle={(event) => setGeneratorOpen(event.currentTarget.open)}>
+      <summary>创建规划包 · 导入或选择大纲</summary>
       <section className="planning-generator">
-        <div className="planning-import-actions"><button className="button secondary small" onClick={onImport} disabled={!!busy}><Plus size={14} />导入已有大纲</button><button className="button secondary small" onClick={onPaste} disabled={!!busy}><PenLine size={14} />粘贴或手写大纲</button><span>总纲选用后，在这里分批展开卷纲、章纲与创作资料。</span></div>
+        <div className="planning-import-actions"><button className="button secondary small" onClick={onImport} disabled={!!busy}><Plus size={14} />导入已有大纲</button><button className="button secondary small" onClick={onPaste} disabled={!!busy}><PenLine size={14} />粘贴或手写大纲</button>{!sources.length && onCreation && <button type="button" className="button secondary small" onClick={onCreation}>从零构思</button>}<span>总纲选用后，在这里分批展开卷纲、章纲与创作资料。</span></div>
         <div className="planning-generator-heading">
           <span className="card-eyebrow">
             <Sparkles size={15} />
@@ -650,6 +697,7 @@ export default function PlanningWorkspace({
             <label className="planning-field source-field">
               来源文稿
               <select
+                ref={sourceRef}
                 value={sourcePath}
                 onChange={(event) => setSourcePath(event.target.value)}
                 required
@@ -710,6 +758,7 @@ export default function PlanningWorkspace({
               disabled={!!busy}
             />
           </label>
+          <div id="planning-task-materials"><TaskMaterialPicker novelId={project.novel_id} purpose="planning" value={effectiveMaterials} disabled={!!busy} onChange={(selection) => { setMaterialSelection(selection || {}); setTaskPreview(null); }} onOpenLibrary={onLibrary ? () => onLibrary({ sourcePath, start, count, instruction, materialSelection: currentMaterialSelection, materialReference: referenceUsedBySelection(taskReference.ticket, effectiveMaterials) }) : undefined} /></div>
           {!selectedProvider?.available && (
             <p className="planning-api-note">
               API 尚未配置。请在“模型设置”中选择模型并填写密钥，保存后再开始生成。
@@ -748,10 +797,11 @@ export default function PlanningWorkspace({
               ) : (
                 <Sparkles size={14} />
               )}
-              预览创作规划
+              预览规划包
               <ArrowRight size={13} />
             </button>
           </div>
+          <p className="planning-generator-status">{!sources.length ? "尚无来源：先导入、粘贴大纲，或从“创意与定位”生成并选用总纲。" : !source ? "先在“来源文稿”中选择一版大纲，才能预览。AI 生成的初版总纲须先在“创意与定位”选用；导入或手写的大纲可直接选择。" : !selectedProvider?.available ? "模型尚未就绪：打开模型设置，保存后再预览；本页输入会保留。" : "预览不调用模型。确认预览后才生成候选规划包，不会自动批准规划或开始写正文。"}</p>
         </form>
         {latestJob && (
           <button
@@ -775,6 +825,12 @@ export default function PlanningWorkspace({
             <ArrowUpRight size={14} />
           </button>
         )}
+        {latestJob?.result_path && <button type="button" className="button secondary small" disabled={!!busy || loadingPackage} onClick={() => {
+          const path = latestJob.result_path!;
+          selectedPathRef.current = path; setSelectedPath(path);
+          void loadPackage(path);
+          packagesRef.current?.scrollIntoView({ block: "start", behavior: "smooth" });
+        }}><BookOpen size={14} />查看最近生成的规划包</button>}
       </section>
       </details>
       {error && (
@@ -786,7 +842,7 @@ export default function PlanningWorkspace({
           </button>
         </div>
       )}
-      <section className="planning-packages">
+      <section ref={packagesRef} className="planning-packages">
         <div className="planning-package-toolbar">
           <div>
             <label htmlFor="planning-package">规划包</label>
@@ -810,13 +866,13 @@ export default function PlanningWorkspace({
               ))}
             </select>
           </div>
-          <IconButton
+          <div className="planning-package-toolbar-actions">{packages.length > 0 && <button type="button" className="button secondary small" disabled={!!busy} onClick={openGenerator}><Plus size={14} />新建规划包</button>}<IconButton
             label="刷新规划包"
             disabled={loading || loadingPackage || !!busy}
             onClick={() => void refresh()}
           >
             <RefreshCw className={loading ? "spin" : ""} size={16} />
-          </IconButton>
+          </IconButton></div>
         </div>
         {loadingPackage ? (
           <div className="planning-loading">

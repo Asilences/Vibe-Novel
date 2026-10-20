@@ -1,0 +1,6 @@
+.guide-shortcuts { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 20px; }
+.guide-document { padding: 0 8px 24px; font-size: 14px; }
+.guide-document h1 { font-size: 24px; }
+.guide-document h2 { font-size: 20px; margin-top: 30px; }
+.guide-document h3 { font-size: 17px; }
+.guide-document table { display: block; max-width: 100%; overflow-x: auto; }

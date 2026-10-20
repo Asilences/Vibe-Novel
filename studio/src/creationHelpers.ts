@@ -58,6 +58,10 @@ export function generationIdentity(envelope: Pick<BriefEnvelope, "path" | "hash"
   return JSON.stringify([envelope.path, envelope.hash, envelope.version_id]);
 }
 
+export function outlineSourceChanged(source: { document_path: string; document_hash: string } | null, documents: { path: string; hash: string }[]): boolean {
+  return !!source && !documents.some((item) => item.path === source.document_path && item.hash === source.document_hash);
+}
+
 export function previewConfiguration(preview: CreationPreview): Record<string, unknown> | null {
   const route = preview.route || preview;
   const candidates = route.candidates;

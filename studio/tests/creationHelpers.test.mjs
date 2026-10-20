@@ -5,7 +5,7 @@ import ts from "typescript";
 
 const source = await readFile(new URL("../src/creationHelpers.ts", import.meta.url), "utf8");
 const { outputText } = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2022 } });
-const { addAuthorTag, briefWarnings, generationIdentity, previewConfiguration, selectedTags, setTagDecision } = await import(`data:text/javascript;base64,${Buffer.from(outputText).toString("base64")}`);
+const { addAuthorTag, briefWarnings, generationIdentity, outlineSourceChanged, previewConfiguration, selectedTags, setTagDecision } = await import(`data:text/javascript;base64,${Buffer.from(outputText).toString("base64")}`);
 const management = { id: "plot:management", label: "经营", dimensions: ["plot"] };
 const friend = { id: "theme:friendship", label: "友情", dimensions: ["theme", "emotion"] };
 const catalog = { tags: [management, friend] };
@@ -58,6 +58,14 @@ test("same-content new history version invalidates generation preview identity",
   const original = { path: "outlines/source/creative-brief.json", hash: "same", version_id: "a" };
   assert.notEqual(generationIdentity(original), generationIdentity({ ...original, version_id: "b" }));
   assert.notEqual(generationIdentity(original), generationIdentity({ ...original, path: "different" }));
+});
+
+test("edited or deleted selected outline cannot expose a current planning shortcut", () => {
+  const selected = { document_path: "outlines/proposals/story-outline-test.md", document_hash: "chosen" };
+  assert.equal(outlineSourceChanged(selected, [{ path: selected.document_path, hash: "chosen" }]), false);
+  assert.equal(outlineSourceChanged(selected, [{ path: selected.document_path, hash: "edited" }]), true);
+  assert.equal(outlineSourceChanged(selected, []), true);
+  assert.equal(outlineSourceChanged(null, []), false);
 });
 
 test("generation carries the exact preview policy and registry identity, including null markers", () => {
