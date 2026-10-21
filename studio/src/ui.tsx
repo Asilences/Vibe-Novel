@@ -60,6 +60,14 @@ export function Modal({
       .find((el) => el.tagName !== "BUTTON")
       ?.focus();
     const key = (event: KeyboardEvent) => {
+      // Nested pickers also use Modal. Let only the visible top dialog handle
+      // keyboard dismissal/focus; a parent must not discard a child's edits
+      // before its own close confirmation has been accepted.
+      const dialogs = document.querySelectorAll<HTMLElement>(
+        '.modal-backdrop > [role="dialog"]',
+      );
+      if (event.defaultPrevented || dialogs[dialogs.length - 1] !== ref.current)
+        return;
       if (event.key === "Escape") {
         event.preventDefault();
         closeRef.current();

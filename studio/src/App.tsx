@@ -93,6 +93,8 @@ import { originalSelectionRange, savedSelectionMatches } from "./textSelection";
 import type { BoundTextSelection } from "./textSelection";
 import EditorialTaskScopePreview, { editorialGoalOptions } from "./EditorialTaskScopePreview";
 import { suggestProposalTarget } from "./proposalTarget";
+import ChaptersWorkspace from "./ChaptersWorkspace";
+import { nextDraftPath } from "./chapterManagement";
 
 type Area =
   | "dashboard"
@@ -106,6 +108,7 @@ type Area =
   | "library"
   | "models"
   | "outlines"
+  | "chapters"
   | "editor"
   | "approvals"
   | "memory"
@@ -126,6 +129,7 @@ const navItems = [
   { id: "characters", label: "人物与世界", icon: Library, group: "故事设计" },
   { id: "timeline", label: "时间线与伏笔", icon: Layers3, group: "故事设计" },
   { id: "style", label: "写作风格", icon: Feather, group: "故事设计" },
+  { id: "chapters", label: "章节管理", icon: BookOpen, group: "写作校订" },
   { id: "editor", label: "章节写作", icon: PenLine, group: "写作校订" },
   { id: "analysis", label: "审稿与检查", icon: CheckCheck, group: "写作校订" },
   { id: "manuscript", label: "已有小说修订", icon: GitCompareArrows, group: "写作校订" },
@@ -591,7 +595,7 @@ export default function App() {
   }
   function newDocument() {
     setNewPath(
-      area === "outlines" ? "outlines/proposals/book.md" : "drafts/ch001.md",
+      area === "outlines" ? "outlines/proposals/book.md" : nextDraftPath(documents),
     );
     setNewDocContent("");
     setShowNewDoc(true);
@@ -1565,7 +1569,7 @@ export default function App() {
                   className="text-button"
                   onClick={() => {
                     setArea("editor");
-                    setNewPath("drafts/ch001.md");
+                    setNewPath(nextDraftPath(documents));
                     setNewDocContent("");
                     setShowNewDoc(true);
                   }}
@@ -1620,6 +1624,12 @@ export default function App() {
               <span>·</span>导入内容作为参考材料
             </div>
           </div>
+        ) : area === "chapters" ? (
+          <ChaptersWorkspace key={project.novel_id} project={project} documents={documents} jobs={jobs} approvals={approvals} busy={!!busy} unsavedPath={dirty ? doc?.path : undefined}
+            onOpen={(item) => { void openDocument(item.path, true, false, undefined, item.hash).then((opened) => { if (opened && item.path.startsWith("chapters/")) setPreview(true); }); }}
+            onNew={newDocument} onExport={() => setExportRange(true)}
+            onRefresh={() => void act("chapters-refresh", () => refresh(project.novel_id))}
+            onApprovals={() => navigate("approvals")} />
         ) : area === "creation" ? (
           <CreationWorkspace key={project.novel_id} project={project} documents={documents} jobs={jobs}
             onChanged={() => refresh(project.novel_id)} onDirtyChange={setChildDirty}
@@ -1716,6 +1726,7 @@ export default function App() {
                     )}
                   </div>
                   <div className="toolbar-buttons">
+                    {area === "editor" && <button type="button" className="button small secondary" onClick={() => navigate("chapters")}><BookOpen size={14} />章节管理</button>}
                     <div className="segmented">
                       <button
                         className={!preview ? "selected" : ""}

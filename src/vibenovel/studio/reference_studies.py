@@ -66,6 +66,7 @@ def study_prompt(kind, question, snapshots, previous=None, estimate=False):
     else:
         instructions += ("按给定先后阅读。本次只追加当前时点知情增量，不回填、改写早先知识。角色知情与读者知情分开，known/suspected/disproved明确区分。"
             "events按发生顺序输出，caused_by只能引用本节点较早事件或已给出的旧event key；characters沿用旧key。"
+            "knowledge.subject只能填写字面量reader，或本节点characters.key/先前known_character_keys中的人物键（如c1），不能填写人物姓名。"
             "线索resolved必须有不同铺设及揭示端点的精确证据；找不到就unresolved/uncertain（合法state为introduced/advanced/resolved/uncertain）。"
             "人物、情绪、节奏不适用时留空并解释，不能机械填满。carry_forward最多6000字符，是下段有界笔记而非完整记忆。"
             "历史精确知识增量均另行保留；只把本次收到的earlier_evidence当实读前文，不声称重新读过未发送部分。"

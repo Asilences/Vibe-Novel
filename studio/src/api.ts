@@ -26,6 +26,9 @@ export type DocumentItem = {
   hash: string;
   bytes: number;
   readonly?: boolean;
+  title?: string | null;
+  character_count?: number | null;
+  summary_status?: "available" | "too_large" | "invalid_utf8";
 };
 export type Document = DocumentItem & { content: string; revision?: number };
 export type Version = {
