@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "ssh_host": "HOST",
+  "ssh_port": 22,
+  "ssh_user": "USER",
+  "local_port": 18000,
+  "remote_port": 8000
+}
