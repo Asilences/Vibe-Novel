@@ -1,0 +1,81 @@
+.manuscript-purpose-guide {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 2fr);
+  gap: 16px;
+  margin: 18px 0;
+  padding: 16px;
+  border: 1px solid #e2e7f0;
+  border-radius: 7px;
+  background: #f8faff;
+  color: #63718b;
+  font-size: 12px;
+  line-height: 1.8;
+  overflow-wrap: anywhere;
+}
+
+.manuscript-purpose-intro h3 {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0;
+  color: #50607e;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.manuscript-purpose-intro p,
+.manuscript-continuation-guide p {
+  margin: 8px 0 0;
+}
+
+.manuscript-continuation-guide {
+  min-width: 0;
+  border-left: 1px solid #e2e7f0;
+  padding-left: 16px;
+}
+
+.manuscript-continuation-guide summary {
+  cursor: pointer;
+  color: #50607e;
+  font-weight: 600;
+}
+
+.manuscript-continuation-guide summary:focus-visible {
+  outline: 2px solid #7382ac;
+  outline-offset: 4px;
+  border-radius: 2px;
+}
+
+.manuscript-continuation-guide .manuscript-order-note {
+  margin-top: 12px;
+  padding: 9px 11px;
+  border: 1px solid #e6dcc9;
+  border-radius: 5px;
+  background: #fffcf5;
+  color: #806a43;
+}
+
+.manuscript-continuation-guide ol {
+  margin: 12px 0 0;
+  padding-left: 21px;
+}
+
+.manuscript-continuation-guide li + li {
+  margin-top: 10px;
+}
+
+.manuscript-guide-action {
+  margin-top: 7px;
+}
+
+@media (max-width: 900px) {
+  .manuscript-purpose-guide {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .manuscript-continuation-guide {
+    border-left: 0;
+    border-top: 1px solid #e2e7f0;
+    padding: 12px 0 0;
+  }
+}

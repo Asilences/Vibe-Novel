@@ -18,6 +18,7 @@ from vibenovel.core.reference_studies import (ReferenceStudiesStore, MAX_RECORD,
     comparison_contract, identity, reading_contract, resolve_response_refs, response_json,
     source_id, text, validate_comparison, validate_reading)
 from vibenovel.errors import VibeNovelError
+from .providers import GenerationResult, generation_problem_message
 
 
 class _RunnerLock:
@@ -402,8 +403,12 @@ class ReferenceStudiesManager:
                                           {"prompt": prompt, "preview": quote, "attempt_key": node["attempt_key"]})
                     generated = self.gateway.generate(quote, prompt, cancel, node["attempt_key"])
                     raw = generated.text if hasattr(generated, "text") else generated["text"]
-                    response = {"text": raw, "usage": getattr(generated, "usage", None), "hash": digest(raw.encode("utf-8"))}
+                    response = {"text": raw, "usage": getattr(generated, "usage", None),
+                                "finish_reason": getattr(generated, "finish_reason", None), "hash": digest(raw.encode("utf-8"))}
                     self.store._write(self.store.path(study_id + "/responses/" + node["id"] + ".json"), response)
+                    problem = generation_problem_message(GenerationResult(raw, response["usage"], finish_reason=response["finish_reason"]))
+                    if problem:
+                        raise VibeNovelError(problem)
                     with self._lock:
                         study = self.store.load(study_id)
                         if cancel.is_set() or study["state"] == "cancelled":

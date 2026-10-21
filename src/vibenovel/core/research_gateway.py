@@ -143,7 +143,7 @@ class ResearchGateway:
                     if digest(path.read_bytes()) != old["response_hash"]:
                         raise ConflictError("已付费研究响应被修改，未重新请求")
                     saved = read_json(path, max_bytes=4 * 1024 * 1024)
-                    return GenerationResult(saved["text"], saved.get("usage"), saved.get("model"))
+                    return GenerationResult(saved["text"], saved.get("usage"), saved.get("model"), saved.get("finish_reason"))
                 raise ConflictError("该研究请求已有发送/费用记录，不自动重放；请核对已有结果")
             config = account["config"]
             if self._config_hash(config) != exact["config_hash"]:
@@ -178,13 +178,15 @@ class ResearchGateway:
                 current["error"] = "请求未完成，保留费用，不自动重发"
                 self._save(account)
             raise VibeNovelError("研究接口未完成，保留费用与请求状态，不自动重发") from None
-        raw = json_bytes({"text": response.text, "usage": response.usage, "model": response.model})
+        raw = json_bytes({"text": response.text, "usage": response.usage, "model": response.model,
+                          "finish_reason": response.finish_reason})
         with project_lock(self, timeout=2):
             path = self.path("responses/" + identity + ".json")
             atomic_write(path, raw, overwrite=False)
             account = self._load()
             current = account["attempts"][identity]
-            current.update(state="succeeded", response_hash=digest(raw), completed_at=utc_now(), usage=response.usage)
+            current.update(state="succeeded", response_hash=digest(raw), completed_at=utc_now(), usage=response.usage,
+                           finish_reason=response.finish_reason)
             usage = response.usage or {}
             if all(type(usage.get(key)) is int and usage[key] >= 0 for key in ("prompt_tokens", "completion_tokens")):
                 reported = (usage["prompt_tokens"] * exact["price_input_usd"] + usage["completion_tokens"] * exact["price_output_usd"]) / 1_000_000

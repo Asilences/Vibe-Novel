@@ -67,6 +67,26 @@ class ResearchGatewayTests(unittest.TestCase):
             gateway.configure(model_id="default_api", max_cost_usd=.00001, price_input_usd=1., price_output_usd=1.)
         self.assertNotIn("upstream private", gateway.path("account.json").read_text(encoding="utf-8"))
 
+    def test_truncated_paid_response_keeps_known_bill_and_reason_when_reused(self):
+        gateway = self.gateway()
+        class Provider:
+            def generate(self, prompt, cancel):
+                return GenerationResult("", {"prompt_tokens": 10, "completion_tokens": 256}, "offline-test", "length")
+        gateway.provider_factory = lambda name: Provider()
+        gateway.configure(model_id="default_api", max_cost_usd=.1, price_input_usd=1., price_output_usd=1.)
+        preview = gateway.preview("已付费的空正文", 256)
+        result = gateway.generate(preview, "已付费的空正文", threading.Event(), "empty-response-1234")
+        self.assertEqual(result.finish_reason, "length")
+        self.assertEqual(result.text, "")
+        self.assertEqual(gateway.status()["uncertain_calls"], 0)
+        self.assertGreater(gateway.status()["reported_cost_usd"], 0)
+        restarted = self.gateway()
+        cached = restarted.generate(preview, "已付费的空正文", threading.Event(), "empty-response-1234")
+        self.assertEqual(cached.finish_reason, "length")
+        self.assertEqual(cached.usage, result.usage)
+        self.assertEqual(restarted.status()["calls"], 1)
+        self.assertEqual(self.calls, [])
+
     def test_prompt_price_model_and_response_tampering_fail_closed(self):
         gateway = self.gateway()
         gateway.configure(model_id="default_api", max_cost_usd=.1, price_input_usd=1., price_output_usd=1.)

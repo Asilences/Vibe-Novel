@@ -115,6 +115,21 @@ class StudyTests(unittest.TestCase):
         self.assertEqual(self.gateway.calls, [])
         self.assertEqual(self.manager.store.load(study["id"])["plan_hash"], frozen)
 
+    def test_length_response_does_not_publish_a_complete_checkpoint(self):
+        generate = self.gateway.generate
+        def truncated(*args):
+            result = generate(*args)
+            result.finish_reason = "length"
+            return result
+        self.gateway.generate = truncated
+        final = self.run_study(self.create())
+        self.assertEqual(final["state"], "failed")
+        self.assertEqual(len(self.gateway.calls), 1)
+        response = self.manager.response(final["id"], "read-00001")
+        self.assertEqual(response["finish_reason"], "length")
+        self.assertTrue(response["text"])
+        self.assertEqual(self.manager.store.export_verified(final["id"])["results"], [])
+
     def test_late_withdrawal_blocks_publication_and_never_replays(self):
         def withdraw():
             current = self.books.detail(self.book["book_id"])

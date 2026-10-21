@@ -205,14 +205,18 @@ class ChapterBriefTests(unittest.TestCase):
         baseline = AnalysisStore(self.project).set_baseline([{"path": sample["path"], "hash": sample["hash"]}])
         plan = self.plan(1)
         source = self.documents.save("outlines/source/seed.md", "来源总纲", None)
-        started, release = threading.Event(), threading.Event()
+        started, release, returned = threading.Event(), threading.Event(), threading.Event()
+        # Preparing and rechecking the frozen context performs disk I/O. Keep
+        # the event handshake bounded while allowing busy Windows test runners.
+        sync_timeout = 15
 
         class Provider:
             def generate(inner, prompt, cancel):
                 self.assertNotIn(sample["content"], prompt)
                 started.set()
-                if not release.wait(5):
+                if not release.wait(sync_timeout * 2):
                     raise RuntimeError("test timeout")
+                returned.set()
                 return GenerationResult("旧样章统计下的候选正文")
 
         manager = JobManager(self.workspace, provider_factory=lambda _: Provider())
@@ -221,18 +225,20 @@ class ChapterBriefTests(unittest.TestCase):
         manager.start()
         job = manager.submit(self.project, {"kind": "draft", "document_path": source["path"],
                              "document_hash": source["hash"], "plan_path": plan["path"], "plan_hash": plan["hash"]})
-        self.assertTrue(started.wait(2))
+        self.assertTrue(started.wait(sync_timeout), "fake provider did not enter after context preparation")
         self.assertEqual(job["context_sources"][sample["path"]], sample["hash"])
         self.documents.save(sample["path"], "作者修改了样章。", sample["hash"])
         self.assertEqual(AnalysisStore(self.project).baseline()["hash"], baseline["hash"])
         release.set()
-        deadline = time.monotonic() + 5
+        deadline = time.monotonic() + sync_timeout
         while time.monotonic() < deadline:
             result = manager.get(self.project, job["id"])
             if result["state"] in ("failed", "succeeded"):
                 break
             time.sleep(.01)
         self.assertEqual(result["state"], "failed", result)
+        self.assertTrue(returned.is_set(), "the late response must return, not fail from a provider timeout")
+        self.assertIn("输入文档已变化", result["error"])
         self.assertIsNone(result["result_path"])
         self.assertEqual(list(self.project.path("drafts").glob("candidate-*")), [])
         # An already stale baseline is explicitly omitted from a fresh job;

@@ -23,6 +23,7 @@ from vibenovel.core.reference_methods import check_frozen_research_plan
 from vibenovel.errors import VibeNovelError
 from .model_registry import ModelRegistry, resolve_snapshot
 from .providers import GenerationResult, OpenAICompatibleProvider, ProviderCancelled
+from .providers import generation_problem_message
 from .routing import BudgetLedger, ProjectRouting
 
 _ID = re.compile(r"[0-9a-f]{32}\Z")
@@ -647,7 +648,11 @@ class ReferenceBatchManager:
                     if not isinstance(response.text, str) or len(response.text.encode("utf-8")) > 1024 * 1024:
                         raise VibeNovelError("模型候选响应超过1MiB保留容量；未发布或自动重试")
                     node["pending_response"] = response.text
+                    node["finish_reason"] = response.finish_reason
                     self._save(batch)
+                    problem = generation_problem_message(response)
+                    if problem:
+                        raise VibeNovelError(problem)
                     self._validate(batch, node)
                     # Inputs and their versions are checked again before publication.
                     self._inputs(batch, node)

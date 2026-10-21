@@ -20,7 +20,7 @@ from vibenovel.core.project import ProjectStore
 from vibenovel.errors import VibeNovelError
 from vibenovel.studio.jobs import JobManager
 from vibenovel.studio.providers import (GenerationResult, OpenAICompatibleProvider, ProviderError,
-                                       capabilities)
+                                       capabilities, generation_problem, generation_problem_message)
 from vibenovel.studio.routing import ProjectRouting, default_policy
 
 
@@ -501,6 +501,58 @@ class APIProviderTests(unittest.TestCase):
                 OpenAICompatibleProvider(self.env).generate("test", threading.Event())
         self.server.reply = (200, b'{"choices":[{"message":{"content":"ok"}}],"usage":{"total_tokens":true}}', {})
         self.assertIsNone(OpenAICompatibleProvider(self.env).generate("test", threading.Event()).usage)
+
+    def test_length_and_empty_reasoning_response_keep_known_usage_and_finish_reason(self):
+        usage = {"prompt_tokens": 11, "completion_tokens": 64, "total_tokens": 75}
+        for content in ('{"chapters":[', None, ""):
+            self.server.reply = (200, json.dumps({"choices": [{"finish_reason": "length", "message": {"content": content}}],
+                                                "usage": usage}).encode(), {})
+            with self.subTest(content=content):
+                result = OpenAICompatibleProvider(self.env).generate("test", threading.Event())
+                self.assertEqual(result.text, content or "")
+                self.assertEqual(result.finish_reason, "length")
+                self.assertEqual(result.usage, usage)
+
+    def test_other_stop_reasons_are_retained_without_text_or_fabricated_usage(self):
+        self.server.reply = (200, b'{"choices":[{"finish_reason":"tool_calls","message":{"content":null,"tool_calls":[{}]}}]}', {})
+        result = OpenAICompatibleProvider(self.env).generate("test", threading.Event())
+        self.assertEqual(result.finish_reason, "tool_calls")
+        self.assertEqual(result.text, "")
+        self.assertIsNone(result.usage)
+
+    def test_malformed_stop_reason_is_incomplete_and_never_exposes_arbitrary_metadata(self):
+        for reason in (42, "", "private\nvalue", "echo-secret-test-key", {"private": "upstream"}):
+            self.server.reply = (200, json.dumps({"choices": [{"finish_reason": reason,
+                                     "message": {"content": "apparently complete"}}]}).encode(), {})
+            with self.subTest(reason=reason):
+                result = OpenAICompatibleProvider(self.env).generate("test", threading.Event())
+                self.assertEqual(result.finish_reason, "invalid")
+                self.assertEqual(generation_problem(result), "non_text_stop")
+                self.assertNotIn("secret-test-key", str(result))
+                self.assertNotIn("实际用量", generation_problem_message(result))
+
+    def test_billed_malformed_message_and_late_cancel_preserve_reported_usage(self):
+        usage = {"prompt_tokens": 4, "completion_tokens": 7, "total_tokens": 11}
+        self.server.reply = (200, json.dumps({"choices": [], "usage": usage}).encode(), {})
+        malformed = OpenAICompatibleProvider(self.env).generate("test", threading.Event())
+        self.assertEqual(malformed.text, "")
+        self.assertEqual(malformed.usage, usage)
+        self.assertEqual(generation_problem(malformed), "empty_text")
+        cancel = threading.Event()
+        self.server.reply = (200, json.dumps({"choices": [{"finish_reason": "stop",
+                            "message": {"content": "returned before cancellation"}}], "usage": usage}).encode(), {})
+        provider = OpenAICompatibleProvider(self.env)
+        original_decode = json.loads
+        def decode_then_cancel(value):
+            decoded = original_decode(value)
+            if isinstance(decoded, dict) and "choices" in decoded:
+                cancel.set()
+            return decoded
+        with patch("vibenovel.studio.providers.json.loads", side_effect=decode_then_cancel):
+            returned = provider.generate("test", cancel)
+        self.assertTrue(cancel.is_set())
+        self.assertEqual(returned.usage, usage)
+        self.assertEqual(returned.finish_reason, "stop")
 
 
 if __name__ == "__main__":

@@ -17,6 +17,7 @@ from vibenovel.core.project import Project, ProjectStore, genre_prompt_path, utc
 from vibenovel.core.locking import ConflictError
 from vibenovel.errors import VibeNovelError
 from .providers import GenerationResult, OpenAICompatibleProvider, ProviderCancelled, ProviderError
+from .providers import generation_problem, generation_problem_message
 from .providers import capabilities as provider_capabilities
 
 from .method_jobs import METHOD_KINDS
@@ -118,8 +119,13 @@ def _approvals(project):
 
 
 def _storage_call(operation):
-    """Wait briefly for another local write, never retry a model request."""
-    deadline = time.monotonic() + 2
+    """Wait for a bounded local lock conflict, never retry a model request.
+
+    A store method already waits two seconds to acquire its lock. A matching
+    outer deadline used to expire on that first failure, so concurrent read
+    endpoints could fail a queued task before it ever sent a request.
+    """
+    deadline = time.monotonic() + 10
     while True:
         try:
             return operation()
@@ -255,17 +261,124 @@ class JobManager:
         path.parent.mkdir(parents=True, exist_ok=True)
         atomic_write(path, json_bytes(job), overwrite=True)
 
+    def _read_saved_job(self, project, job_id):
+        path = self._path(project, job_id)
+        if path.stat().st_size <= 8 * 1024 * 1024:
+            return read_json(path, max_bytes=8 * 1024 * 1024)
+        # Narrow compatibility for records created by the inline-response
+        # version. Read a bounded legacy record, retain its exact bytes, and
+        # remove only the duplicate archive text from the active manifest.
+        job = read_json(path, max_bytes=16 * 1024 * 1024)
+        self._validate_saved(project, job_id, job)
+        returned = job.get("_provider_response")
+        if not isinstance(returned, dict) or "path" in returned:
+            raise VibeNovelError("任务记录超过8MiB且不是可去重的旧响应归档；原件保留")
+        content = self._response_text(job, project)
+        try:
+            raw = content.encode("utf-8") if isinstance(content, str) else None
+        except UnicodeError:
+            raw = None
+        if raw is None or len(raw) > 4 * 1024 * 1024 or digest(raw) != returned.get("hash"):
+            raise VibeNovelError("旧付费响应归档无效，未修改超限任务记录")
+        archive = self._archive_response(project, job, GenerationResult(
+            content, returned.get("usage"), returned.get("model"), returned.get("finish_reason")))
+        job["_provider_response"] = archive
+        if len(json_bytes(job)) > 8 * 1024 * 1024:
+            raise VibeNovelError("任务记录去重后仍超过8MiB，未修改原件或重复请求")
+        legacy_path = project.path(".runtime/provider-responses/" + job_id + "-legacy.json")
+        with path.open("rb") as stream:
+            old = stream.read(16 * 1024 * 1024 + 1)
+        if len(old) > 16 * 1024 * 1024:
+            raise ConflictError("旧任务原件在备份前变化，未覆盖")
+        if legacy_path.exists():
+            with legacy_path.open("rb") as stream:
+                backup = stream.read(16 * 1024 * 1024 + 1)
+            if backup != old:
+                raise ConflictError("旧任务原件备份已存在不同内容，未覆盖")
+        else:
+            atomic_write(legacy_path, old, overwrite=False)
+        self._persist(project, job)
+        return job
+
     @staticmethod
-    def _public(job):
+    def _response_path(project, job_id):
+        if not isinstance(job_id, str) or not _ID.fullmatch(job_id):
+            raise VibeNovelError("模型响应归档任务 ID 无效")
+        return ".runtime/provider-responses/" + job_id + ".txt"
+
+    @staticmethod
+    def _archive_response(project, job, result):
+        # Keep paid raw text once, outside the bounded task JSON. Publication
+        # intents/repair candidates already contain a second copy of this text;
+        # embedding the archive as well could make a valid task unrestartable.
+        raw = result.text.encode("utf-8")
+        if len(raw) > 4 * 1024 * 1024:
+            raise VibeNovelError("模型原始响应超过4MiB归档上限，未发布候选")
+        relative = JobManager._response_path(project, job["id"])
+        path = project.path(relative)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists():
+            with path.open("rb") as stream:
+                existing = stream.read(4 * 1024 * 1024 + 1)
+            if existing != raw:
+                raise ConflictError("已有付费原响应归档不同，未覆盖或再次请求")
+        else:
+            atomic_write(path, raw, overwrite=False)
+        return {"path": relative, "bytes": len(raw), "hash": digest(raw),
+                "usage": result.usage, "model": result.model,
+                "finish_reason": result.finish_reason}
+
+    @staticmethod
+    def _response_text(job, project):
+        returned = job.get("_provider_response")
+        if not isinstance(returned, dict):
+            return None
+        if "path" not in returned:
+            # Existing local tasks retain their embedded paid evidence.
+            return returned.get("text")
+        if project is None or job.get("novel_id") != project.novel_id:
+            return None
+        try:
+            relative = JobManager._response_path(project, job.get("id"))
+            if (returned.get("path") != relative or type(returned.get("bytes")) is not int
+                    or not 0 <= returned["bytes"] <= 4 * 1024 * 1024):
+                return None
+            with project.path(relative).open("rb") as stream:
+                raw = stream.read(4 * 1024 * 1024 + 1)
+            if len(raw) != returned["bytes"] or digest(raw) != returned.get("hash"):
+                return None
+            return raw.decode("utf-8")
+        except (OSError, VibeNovelError, UnicodeError):
+            # A damaged archive is never trusted or replaced by another file.
+            return None
+
+    @staticmethod
+    def _public(job, project=None):
         result = copy.deepcopy({key: value for key, value in job.items() if not key.startswith("_")})
         result.pop("handoff_prompt", None)  # Legacy records remain on disk, not an executable workflow.
         pending = job.get("_pending_result") or job.get("_pending_library_result")
         result["recovery_available"] = bool(pending and job["state"] == "interrupted" and job["provider"] == "api")
         result.pop("recovery_candidate", None)
+        result.pop("response_candidate", None)
+        result.pop("response_archived", None)
         if job["provider"] != "api":
             result.pop("repair_candidate", None)
         if result["recovery_available"]:
             result["recovery_candidate"] = pending.get("content") or json.dumps(pending.get("bundle"), ensure_ascii=False, indent=2)
+        returned = job.get("_provider_response")
+        archived = job["provider"] == "api" and job["state"] == "failed" and not job.get("response_problem")
+        if (job.get("response_problem") or archived) and isinstance(returned, dict):
+            content = JobManager._response_text(job, project)
+            try:
+                raw = content.encode("utf-8") if isinstance(content, str) else None
+            except UnicodeError:
+                raw = None
+            if raw is not None and len(raw) <= 4 * 1024 * 1024 and digest(raw) == returned.get("hash"):
+                # A charged response can be complete while its publication is
+                # stale. Viewing that archive grants no recovery/approval right.
+                result["response_candidate"] = content
+                if archived:
+                    result["response_archived"] = True
         return result
 
     @staticmethod
@@ -303,7 +416,7 @@ class JobManager:
                 if not path.is_file() or not _ID.fullmatch(path.stem) or path.suffix != ".json":
                     raise VibeNovelError("任务目录含未知文件，请先检查 .runtime/jobs")
                 path = self._path(project, path.stem)
-                job = read_json(path, max_bytes=8 * 1024 * 1024)
+                job = self._read_saved_job(project, path.stem)
                 self._validate_saved(project, path.stem, job)
                 if job["provider"] == "codex" and job["state"] not in TERMINAL:
                     job["state"] = "interrupted"
@@ -346,6 +459,8 @@ class JobManager:
         raw = pending["content"].encode("utf-8")
         if not raw.strip() or len(raw) > 2 * 1024 * 1024 or digest(raw) != pending.get("hash"):
             raise VibeNovelError("任务候选发布记录哈希不匹配；已阻止恢复")
+        if pending.get("finish_reason") not in (None, "stop"):
+            raise VibeNovelError("模型响应未完整结束；保留残稿，不能作为完整候选恢复")
         return pending
 
     def _recover_pending(self, project, job):
@@ -460,7 +575,7 @@ class JobManager:
         project = self._project(project)
         self._ensure_started()
         with self._lock:
-            return [self._public(job) for key, job in sorted(self._jobs.items(),
+            return [self._public(job, project) for key, job in sorted(self._jobs.items(),
                     key=lambda pair: pair[1]["created_at"], reverse=True) if key[0] == project.novel_id]
 
     def _get(self, project, job_id):
@@ -474,7 +589,7 @@ class JobManager:
         project = self._project(project)
         self._ensure_started()
         with self._lock:
-            return self._public(self._get(project, job_id))
+            return self._public(self._get(project, job_id), project)
 
     def _prepare(self, project, request):
         prepared = self._prepare_base(project, request)
@@ -799,7 +914,7 @@ class JobManager:
         match = re.fullmatch(r"outlines/proposals/story-outline-([0-9a-f]{32})\.md", str(path))
         if not match:
             raise VibeNovelError("不是初版总纲候选路径")
-        job = read_json(self._path(project, match[1]), max_bytes=8 * 1024 * 1024)
+        job = self._read_saved_job(project, match[1])
         self._validate_saved(project, match[1], job)
         if (job["kind"] != "generate_story_outline" or job["state"] != "succeeded"
                 or job.get("result_path") != path or not isinstance(job.get("creative_brief"), dict)):
@@ -924,7 +1039,7 @@ class JobManager:
                                 or old.get("expected_library_hash") != expected_library_hash
                                 or old.get("workflow_id") != workflow_id or old.get("workflow_node") != workflow_node):
                             raise ConflictError("任务幂等键已绑定另一份请求或预览；请使用新键")
-                        return self._public(old)
+                        return self._public(old, project)
             if isinstance(request, dict) and request.get("kind") in METHOD_KINDS:
                 if workflow_id is not None or budget_group is not None:
                     raise VibeNovelError("资料分析与方法提炼使用独立显式流程，不接受写作流程或任意预算组")
@@ -940,7 +1055,7 @@ class JobManager:
                         if (old["request"] != normalized or old.get("expected_configuration") != expected_configuration
                                 or old.get("expected_library_hash") != expected_library_hash):
                             raise ConflictError("方法幂等键已绑定另一份请求；请重新预览并使用新键")
-                        return self._public(old)
+                        return self._public(old, project)
             if isinstance(request, dict) and request.get("kind") == "generate_story_outline":
                 if workflow_id is not None or budget_group is not None:
                     raise VibeNovelError("初版总纲是独立规划节点，不能加入候选写作流程或重用旧预算组")
@@ -959,7 +1074,7 @@ class JobManager:
                                 or old.get("expected_configuration") != expected_configuration
                                 or old.get("expected_library_hash") != expected_library_hash):
                             raise ConflictError("此幂等键已绑定另一份总纲请求；请重新预览并使用新键")
-                        return self._public(old)
+                        return self._public(old, project)
             if sum(job["state"] not in TERMINAL for job in self._jobs.values()) >= self._max_pending:
                 raise VibeNovelError("任务队列已满，请完成或取消已有任务")
             request, prompt, sources, fingerprint, canonical_revision, brief_snapshot = self._prepare(project, request)
@@ -1017,7 +1132,7 @@ class JobManager:
             key = (project.novel_id, job_id)
             self._jobs[key] = job
             self._queue.put(key)
-            return self._public(job)
+            return self._public(job, project)
 
     @staticmethod
     def _idempotent_request(request):
@@ -1175,7 +1290,7 @@ class JobManager:
                 # This checks identity only; it never rebuilds or substitutes
                 # the frozen destination, parameters, or budget.
                 from .routing import ProjectRouting
-                policy = ProjectRouting(project, self.workspace).public()
+                policy = _storage_call(lambda: ProjectRouting(project, self.workspace).public())
                 if (policy["revision"] != expected["policy_revision"]
                         or policy["hash"] != expected["policy_hash"]):
                     raise ConflictError("任务策略在发送前变化，未发送请求；请重新预览并创建任务")
@@ -1194,7 +1309,7 @@ class JobManager:
             with self._lock:
                 if not self._active(project, job, event, token):
                     raise ProviderCancelled("任务已停止，未发送后续请求")
-                job["budget_summary"] = ledger.reserve(group, attempt_id, route, candidate)
+                job["budget_summary"] = _storage_call(lambda: ledger.reserve(group, attempt_id, route, candidate))
                 attempt = {"id": attempt_id, "profile_id": candidate["id"], "model": candidate["model"],
                            "registry_revision": candidate["registry_revision"], "state": "running",
                            "started_at": utc_now(), "usage": None, "billing": "reserved"}
@@ -1210,7 +1325,7 @@ class JobManager:
                     attempt.update(state="cancelled" if isinstance(exc, ProviderCancelled) else "failed",
                                    finished_at=utc_now(), billing=status,
                                    http_status=getattr(exc, "http_status", None))
-                    job["budget_summary"] = ledger.settle(group, attempt_id, status=status)
+                    job["budget_summary"] = _storage_call(lambda: ledger.settle(group, attempt_id, status=status))
                     self._persist(project, job)
                 if (isinstance(exc, ProviderError) and exc.retryable and not event.is_set()
                         and len(job["attempts"]) < route["max_attempts"]):
@@ -1221,7 +1336,7 @@ class JobManager:
                 raise
             with self._lock:
                 usage = result.usage if isinstance(result, GenerationResult) else None
-                job["budget_summary"] = ledger.settle(group, attempt_id, usage=usage, status="known")
+                job["budget_summary"] = _storage_call(lambda: ledger.settle(group, attempt_id, usage=usage, status="known"))
                 attempt.update(state="succeeded", finished_at=utc_now(), usage=usage,
                                response_model=result.model if isinstance(result, GenerationResult) else None,
                                billing="reported" if isinstance(usage, dict) and all(type(usage.get(k)) is int and usage[k] >= 0
@@ -1229,6 +1344,14 @@ class JobManager:
                 job["selected_model"] = {"profile_id": candidate["id"], "label": candidate["label"],
                                          "model": candidate["model"], "base_url": candidate["base_url"],
                                          "response_model": result.model if isinstance(result, GenerationResult) else None}
+                if isinstance(result, GenerationResult):
+                    # Preserve the paid response before parsing or publishing.
+                    # A known token bill stays known even for empty/partial text.
+                    job["usage"] = usage
+                    job["finish_reason"] = result.finish_reason
+                    job["response_problem"] = generation_problem(result)
+                    job["_provider_response"] = self._archive_response(project, job, result)
+                    attempt["finish_reason"] = result.finish_reason
                 if event.is_set() or not self._active(project, job, event, token):
                     attempt["state"] = "discarded"
                     self._persist(project, job)
@@ -1241,7 +1364,7 @@ class JobManager:
         if event.is_set() or self._stop.is_set() or job["state"] != "running":
             return False
         try:
-            disk = read_json(self._path(project, job["id"]), max_bytes=8 * 1024 * 1024)
+            disk = self._read_saved_job(project, job["id"])
         except (OSError, VibeNovelError):
             job["state"] = "interrupted"
             job["error"] = "任务记录或作品已移走或无效；未发布返回结果。"
@@ -1249,8 +1372,22 @@ class JobManager:
         return disk.get("state") == "running" and disk.get("_run_token") == token
 
     def _publish(self, project, job, result, *, prepared=False):
-        if not isinstance(result, GenerationResult) or not isinstance(result.text, str) or not result.text.strip():
+        if not isinstance(result, GenerationResult) or not isinstance(result.text, str):
             raise ProviderError("模型没有返回有效候选文本")
+        problem = generation_problem(result)
+        if problem:
+            if prepared:
+                raise VibeNovelError("未完成的模型响应不能作为完整候选恢复")
+            self._validate_snapshot(project, job)
+            repairable = job["kind"] in ("build_blueprint",) + METHOD_KINDS and bool(result.text.strip()) and len(result.text.encode("utf-8")) <= 2 * 1024 * 1024
+            job["state"] = "awaiting_input" if repairable else "failed"
+            if repairable:
+                job["repair_candidate"] = result.text
+            job["error"] = generation_problem_message(result)
+            job.pop("_run_token", None)
+            self._log(job, "已返回响应未完成；仅保留原始内容与已知用量，未发布完整候选或自动重试。")
+            self._persist(project, job)
+            return
         if len(result.text.encode("utf-8")) > 2 * 1024 * 1024:
             raise ProviderError("候选文本超过 2 MiB 上限")
         self._validate_snapshot(project, job)
@@ -1266,7 +1403,7 @@ class JobManager:
                         or len(result.text) < len(prefix) + len(suffix)):
                     raise VibeNovelError("待恢复候选的选区外原文不匹配，未发布")
             else:
-                result = GenerationResult(prefix + result.text + suffix, result.usage, result.model)
+                result = GenerationResult(prefix + result.text + suffix, result.usage, result.model, result.finish_reason)
             if len(result.text.encode("utf-8")) > 2 * 1024 * 1024:
                 raise ProviderError("拼接后的完整修订候选超过 2 MiB 上限")
         usage = None
@@ -1283,10 +1420,10 @@ class JobManager:
             prepare = validate_artifact if prepared else prepare_artifact
             content = prepare(project, job["kind"], result.text,
                               job["request"]["document_path"], job["request"]["document_hash"])
-            result = GenerationResult(content, usage, result.model)
+            result = GenerationResult(content, usage, result.model, result.finish_reason)
         if job["kind"] == "build_blueprint":
             try:
-                result = GenerationResult(self._prepare_blueprint(project, job, result.text), usage, result.model)
+                result = GenerationResult(self._prepare_blueprint(project, job, result.text), usage, result.model, result.finish_reason)
             except ConflictError:
                 raise
             except VibeNovelError as exc:
@@ -1300,7 +1437,8 @@ class JobManager:
                 return
         target = self._result_path(job)
         job["_pending_result"] = {"path": target, "hash": digest(result.text.encode("utf-8")),
-                                  "content": result.text, "usage": usage, "provenance": "AI_SUGGESTED"}
+                                  "content": result.text, "usage": usage, "finish_reason": result.finish_reason,
+                                  "provenance": "AI_SUGGESTED"}
         self._log(job, "候选返回，先持久化发布记录，再保存候选。")
         self._persist(project, job)
         document = _storage_call(lambda: _documents(project).save(target, result.text, expected_hash=None,
@@ -1317,6 +1455,8 @@ class JobManager:
             raise ConflictError("候选发布后版本已变化，请刷新检查")
         job["result_version_id"] = history[0]["id"]
         job["state"] = "succeeded"
+        if job.get("response_problem"):
+            job["response_repaired"] = True
         job["error"] = None
         job.pop("repair_candidate", None)
         self._log(job, "候选已保存；尚未正式定稿或更新记忆。")
@@ -1341,6 +1481,8 @@ class JobManager:
     def _complete_library(self, project, job, published):
         job.update(result_library=published, result_hash=job["_pending_library_result"]["hash"],
                    state="succeeded", error=None)
+        if job.get("response_problem"):
+            job["response_repaired"] = True
         job.pop("repair_candidate", None)
         self._log(job, "资料候选包完整入库；尚未采用、试用或更改小说正式资料。")
         try:
@@ -1414,7 +1556,7 @@ class JobManager:
         with self._lock:
             job = self._get(project, job_id)
             if job["state"] in TERMINAL:
-                return self._public(job)
+                return self._public(job, project)
             event = self._events.get((project.novel_id, job_id))
             if event:
                 event.set()
@@ -1422,7 +1564,7 @@ class JobManager:
             job.pop("_run_token", None)
             self._log(job, "作者取消任务；若请求已发出，其迟到响应将丢弃。")
             self._persist(project, job)
-            return self._public(job)
+            return self._public(job, project)
 
     def pause(self, project, job_id):
         project = self._project(project)
@@ -1441,7 +1583,7 @@ class JobManager:
             else:
                 raise VibeNovelError("仅排队或运行中的任务可以暂停")
             self._persist(project, job)
-            return self._public(job)
+            return self._public(job, project)
 
     def resume(self, project, job_id):
         project = self._project(project)
@@ -1455,7 +1597,7 @@ class JobManager:
             self._log(job, "任务继续排队。")
             self._persist(project, job)
             self._queue.put((project.novel_id, job_id))
-            return self._public(job)
+            return self._public(job, project)
 
     def retry(self, project, job_id):
         project = self._project(project)
@@ -1483,7 +1625,7 @@ class JobManager:
             job["retry_of"] = old["id"]
             self._log(job, "作者明确重试，创建关联的新任务。")
             self._persist(project, job)
-            return self._public(job)
+            return self._public(job, project)
 
     def repair_result(self, project, job_id, text):
         project = self._project(project)
@@ -1498,7 +1640,7 @@ class JobManager:
             if job.get("_pending_result"):
                 self._recover_pending(project, job)
                 if job["state"] == "succeeded":
-                    return self._public(job)
+                    return self._public(job, project)
                 raise VibeNovelError("已有待恢复候选，请恢复结果；未覆盖原候选")
             try:
                 self._publish(project, job, GenerationResult(text, job.get("usage") if repair else None))
@@ -1511,7 +1653,7 @@ class JobManager:
                     except (OSError, VibeNovelError):
                         pass
                 raise
-            return self._public(job)
+            return self._public(job, project)
 
     def recover_result(self, project, job_id):
         """Explicitly publish a preserved candidate, never call the provider."""
@@ -1524,7 +1666,7 @@ class JobManager:
                     raise VibeNovelError("此方法任务没有等待恢复的候选包")
                 self._validate_snapshot(project, job)
                 self._publish_library(project, job, None, job.get("usage"), prepared=True)
-                return self._public(job)
+                return self._public(job, project)
             if job["provider"] != "api":
                 raise VibeNovelError("Codex 交互协作已停用；旧记录仅供查看，请新建 API 任务")
             if job["state"] != "interrupted" or not job.get("_pending_result"):
@@ -1532,9 +1674,9 @@ class JobManager:
             pending = self._pending_result(job)
             self._recover_pending(project, job)
             if job["state"] == "succeeded":
-                return self._public(job)
+                return self._public(job, project)
             if project.path(pending["path"]).exists():
                 raise VibeNovelError("候选路径存在冲突；未覆盖，请人工检查")
             self._validate_snapshot(project, job)
             self._publish(project, job, GenerationResult(pending["content"], pending.get("usage")), prepared=True)
-            return self._public(job)
+            return self._public(job, project)

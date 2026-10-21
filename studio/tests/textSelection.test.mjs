@@ -8,7 +8,7 @@ const source = await readFile(new URL("../src/textSelection.ts", import.meta.url
 const { outputText } = ts.transpileModule(source, {
   compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2022 },
 });
-const { originalSelectionRange, originalCharacterOffset, splitSourceLines } = await import(
+const { originalSelectionRange, originalCharacterOffset, splitSourceLines, savedSelectionMatches } = await import(
   `data:text/javascript;base64,${Buffer.from(outputText).toString("base64")}`
 );
 
@@ -33,6 +33,32 @@ test("caret endpoints clamp safely to original document bounds", () => {
   assert.equal(originalCharacterOffset("甲\r\n😀乙", -1), 0);
   assert.equal(originalCharacterOffset("甲\r\n😀乙", 999), 5);
   assert.deepEqual(originalSelectionRange("", 0, 0), { start_char: 0, end_char: 0 });
+});
+
+test("an assistant selection remains bound to one saved document and Unicode range", () => {
+  const document = {path:"drafts/ch001.md",hash:"saved-hash",content:"前😀\r\n𠀀目标\r末行"};
+  const selection = {novelId:"football",path:document.path,hash:document.hash,...originalSelectionRange(document.content,4,8)};
+  const matches = (chosen=selection, novelId="football", doc=document, text=document.content, listedHash=document.hash) => savedSelectionMatches(chosen,novelId,doc,text,listedHash);
+  assert.equal(matches(),true);
+  assert.equal(Array.from(document.content).slice(selection.start_char,selection.end_char).join(""),"𠀀目标");
+  assert.equal(matches(null),false);
+  assert.equal(matches(selection,"other-book"),false);
+  assert.equal(matches(selection,"football",{...document,path:"drafts/ch002.md"}),false);
+  assert.equal(matches(selection,"football",{...document,hash:"new-hash"}),false);
+  assert.equal(matches(selection,"football",document,document.content+"尚未保存"),false);
+  assert.equal(matches(selection,"football",document,document.content,"external-change"),false);
+  assert.equal(savedSelectionMatches(selection,"football",document,document.content,undefined),false);
+  assert.equal(savedSelectionMatches(selection,undefined,document,document.content,document.hash),false);
+  assert.equal(matches(selection,"football",null),false);
+});
+
+test("stale or malformed assistant ranges never become whole-document edits", () => {
+  const document = {path:"drafts/ch001.md",hash:"saved-hash",content:"甲😀乙"};
+  const base = {novelId:"football",path:document.path,hash:document.hash,start_char:0,end_char:3};
+  for (const range of [{start_char:-1},{end_char:4},{start_char:3},{end_char:0},{start_char:0.5},{end_char:NaN},{start_char:true},{hash:"old-hash"},{path:"drafts/other.md"}]) {
+    assert.equal(savedSelectionMatches({...base,...range},"football",document,document.content,document.hash),false);
+  }
+  assert.equal(savedSelectionMatches(base,"football",document,document.content,document.hash),true);
 });
 
 const lineCases = [

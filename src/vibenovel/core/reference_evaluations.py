@@ -376,7 +376,12 @@ class ReferenceEvaluationManager:
                         self._write(evaluation_id + "/requests/" + node["id"] + ".json", {"prompt":prompt,"preview":quote,"attempt_key":attempt})
                     generated = self.gateway.generate(quote, prompt, cancel, attempt)
                     raw = generated.text
-                    self._write(evaluation_id + "/responses/" + node["id"] + ".json", {"text":raw,"hash":digest(raw.encode()),"usage":generated.usage})
+                    self._write(evaluation_id + "/responses/" + node["id"] + ".json", {"text":raw,"hash":digest(raw.encode()),"usage":generated.usage,
+                                "finish_reason":getattr(generated,"finish_reason",None)})
+                    from vibenovel.studio.providers import generation_problem_message
+                    problem = generation_problem_message(generated)
+                    if problem:
+                        raise VibeNovelError(problem)
                     with self._lock:
                         record = self._load(evaluation_id)
                         if cancel.is_set() or record["state"] == "cancelled":
