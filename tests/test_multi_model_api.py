@@ -78,14 +78,17 @@ class MultiModelAPITests(unittest.TestCase):
                 "editorial": {"goals": ["preserve_voice"], "intensity": "conservative"}}
 
     def wait_flow(self, identity, states):
-        until = time.monotonic() + 4
+        # Nine-node revision flows keep more durable snapshots than the first
+        # three-node sample. Allow the same bounded storage wait as production
+        # without hammering the workflow lock with 100 GET requests per second.
+        until = time.monotonic() + 12
         while time.monotonic() < until:
             response = self.client.get(self.base + "/workflows/" + identity)
             self.assertEqual(response.status_code, 200, response.text)
             flow = response.json()
             if flow["state"] in states:
                 return flow
-            time.sleep(.01)
+            time.sleep(.025)
         self.fail(str(flow))
 
     def test_registry_secrets_conflicts_endpoint_binding_and_validation_redaction(self):
@@ -142,6 +145,76 @@ class MultiModelAPITests(unittest.TestCase):
         response = self.send(self.base + "/workflows", {"request": dict(self.request(), kind="draft")})
         self.assertEqual(response.status_code, 400)
         self.assertEqual(self.provider.calls, 0)
+
+    def test_http_revision_rounds_share_budget_and_third_round_cannot_call(self):
+        self.configure()
+        fingerprint = self.project.fingerprint()
+        created = self.send(self.base + "/workflows", {"request": self.request()})
+        self.assertEqual(created.status_code, 201, created.text)
+        identity = created.json()["id"]
+        url = self.base + "/workflows/" + identity
+        flow = self.wait_flow(identity, {"awaiting_advance", "failed"})
+        for round_number in range(3):
+            for expected in ("awaiting_advance", "ready"):
+                advanced = self.send(url + "/advance", {})
+                self.assertEqual(advanced.status_code, 200, advanced.text)
+                flow = self.wait_flow(identity, {expected, "failed"})
+                self.assertEqual(flow["state"], expected, flow)
+            self.assertEqual(flow["revision_rounds"], round_number)
+            self.assertEqual(flow["budget_summary"]["calls"], 3 * (round_number + 1))
+            if round_number < 2:
+                revised = self.send(url + "/revise", {"issue_ids": ["i1"], "instruction": "仅修改已选原句。"})
+                self.assertEqual(revised.status_code, 200, revised.text)
+                flow = self.wait_flow(identity, {"awaiting_advance", "failed"})
+                self.assertEqual(flow["state"], "awaiting_advance", flow)
+        self.assertEqual(self.provider.calls, 9)
+        self.assertEqual(self.send(url + "/revise", {"issue_ids": ["i1"]}).status_code, 400)
+        self.assertEqual(self.provider.calls, 9)
+        self.assertEqual(self.project.fingerprint(), fingerprint)
+        self.assertFalse(list(self.project.path("chapters").glob("*.md")))
+        self.assertFalse(list(self.project.path("memory").rglob("*.json")))
+
+    def test_http_paused_cancelled_flow_and_node_retry_never_start_successors(self):
+        self.configure()
+        created = self.send(self.base + "/workflows", {"request": self.request()})
+        self.assertEqual(created.status_code, 201, created.text)
+        identity = created.json()["id"]
+        url = self.base + "/workflows/" + identity
+        flow = self.wait_flow(identity, {"awaiting_advance", "failed"})
+        self.assertEqual(flow["state"], "awaiting_advance", flow)
+        paused = self.send(url + "/pause", {})
+        self.assertEqual(paused.status_code, 200, paused.text)
+        self.assertEqual(paused.json()["state"], "paused")
+        self.assertEqual(self.client.get(url).json()["state"], "paused")
+        self.assertEqual(self.provider.calls, 1)
+        cancelled = self.send(url + "/cancel", {})
+        self.assertEqual(cancelled.status_code, 200, cancelled.text)
+        self.assertEqual(cancelled.json()["state"], "cancelled")
+        self.assertEqual(self.send(url + "/advance", {}).status_code, 400)
+        self.assertEqual(self.send(url + "/revise", {"issue_ids": ["i1"]}).status_code, 400)
+        job_id = flow["nodes"][0]["job_id"]
+        self.assertEqual(self.send(self.base + "/jobs/" + job_id + "/retry", {}).status_code, 400)
+        self.assertEqual(self.provider.calls, 1)
+        self.assertEqual(len(self.client.get(self.base + "/jobs").json()["jobs"]), 1)
+
+    def test_http_policy_round_trip_stales_workflow_without_new_call(self):
+        self.configure()
+        created = self.send(self.base + "/workflows", {"request": self.request()})
+        self.assertEqual(created.status_code, 201, created.text)
+        identity = created.json()["id"]
+        flow = self.wait_flow(identity, {"awaiting_advance", "failed"})
+        self.assertEqual(flow["state"], "awaiting_advance", flow)
+        routing = self.client.get(self.base + "/routing").json()
+        original_limit = routing["policy"]["max_calls"]
+        for limit in (original_limit + 1, original_limit):
+            routing["policy"]["max_calls"] = limit
+            changed = self.send(self.base + "/routing", {"expected_hash": routing["hash"], "policy": routing["policy"]}, "PUT")
+            self.assertEqual(changed.status_code, 200, changed.text)
+            routing = changed.json()
+        url = self.base + "/workflows/" + identity
+        self.assertTrue(self.client.get(url).json()["stale"])
+        self.assertEqual(self.send(url + "/advance", {}).status_code, 400)
+        self.assertEqual(self.provider.calls, 1)
 
     def test_registry_availability_overrides_legacy_in_both_directions(self):
         # A configured legacy key must not enable an empty active registry.

@@ -1,6 +1,11 @@
 import type { LibraryEntry, LibraryOverview } from "./api";
 
 export type MaterialPurpose = "planning" | "writing" | "review" | "rewrite" | "reference";
+export function taskMaterialPurpose(kind: string): MaterialPurpose {
+  if (["generate_story_outline", "expand_outline", "build_blueprint"].includes(kind)) return "planning";
+  if (["review", "review_evidence"].includes(kind)) return "review";
+  return kind === "rewrite" ? "rewrite" : "writing";
+}
 export type TaskMaterialOption = { id: string; key: string; kind: "entry" | "binding"; title: string; summary: string; type: string; outbound: string; version: string; disabledReason: string | null };
 const keys = ["entry_ids", "binding_ids", "source_ranges", "query", "retrieval_selection"] as const;
 const record = (value: unknown): Record<string, unknown> => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};

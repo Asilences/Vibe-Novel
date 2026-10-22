@@ -26,6 +26,13 @@ export function originalSelectionRange(source: string, selectionStart: number, s
            end_char: originalCharacterOffset(source, selectionEnd, "end") };
 }
 
+export type BoundTextSelection = { novelId: string; path: string; hash: string; start_char: number; end_char: number };
+
+/** A range belongs to one saved document, never to unsaved or replaced text. */
+export function savedSelectionMatches(selection: BoundTextSelection | null, novelId: string | undefined, document: { path: string; hash: string; content: string } | null, currentText: string, listedHash: string | undefined): boolean {
+  return !!selection && !!novelId && !!document && selection.novelId === novelId && selection.path === document.path && selection.hash === document.hash && listedHash === document.hash && currentText === document.content && Number.isInteger(selection.start_char) && Number.isInteger(selection.end_char) && 0 <= selection.start_char && selection.start_char < selection.end_char && selection.end_char <= Array.from(document.content).length;
+}
+
 /** Match Python str.splitlines(), used by manuscript chapter boundaries. */
 export function splitSourceLines(source: string): string[] {
   if (!source) return [];

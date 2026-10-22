@@ -29,8 +29,8 @@ class StudyAPITests(unittest.TestCase):
     def post(self, suffix, payload=None):
         return self.client.post("/api/reference-studies" + suffix, json=payload or {}, headers=self.headers)
 
-    def prepare(self):
-        request = self.request()
+    def prepare(self, request=None):
+        request = request or self.request()
         quoted = self.post("/preview", request)
         self.assertEqual(quoted.status_code, 200, quoted.text)
         response = self.post("", {**request, "expected_preview": quoted.json()["hash"], "idempotency_key": uuid.uuid4().hex})
@@ -83,6 +83,40 @@ class StudyAPITests(unittest.TestCase):
         self.assertEqual(exported.status_code, 409, exported.text)
         preview = self.post("/" + study["id"] + "/methods/preview", {"method_indices": [0]})
         self.assertEqual(preview.status_code, 409, preview.text)
+
+    def test_reread_exact_range_stays_retrospective_without_rewriting_first_read(self):
+        first = self.prepare()
+        self.assertEqual(self.post("/" + first["id"] + "/start").status_code, 200)
+        self.app.state.reference_studies._threads[first["id"]].join(timeout=15)
+        url = "/api/reference-studies/" + first["id"] + "/export"
+        original = self.client.get(url).json()
+        self.assertEqual(original["state"], "succeeded")
+        self.assertTrue(all(row["temporal_mode"] == "first_read" for row in original["results"]))
+        study_root = self.app.state.reference_studies.store.path(first["id"])
+        saved = {path.relative_to(study_root): path.read_bytes() for path in study_root.rglob("*") if path.is_file()}
+
+        chapter = self.book["chapters"][1]
+        request = self.request()
+        request.update(kind="reread", question="回顾核对渡口信息，仅分析明确选段，不回填初读知情。")
+        request["sources"][0] = {"book_id": self.book["book_id"], "edition_id": self.book["edition_id"],
+                                  "ranges": [{"chapter_id": chapter["chapter_id"], "start_char": 1, "end_char": 20}]}
+        calls_before = len(self.gateway.calls)
+        reread = self.prepare(request)
+        self.assertEqual(len(self.gateway.calls), calls_before)
+        self.assertEqual(reread["state"], "prepared")
+        self.assertEqual(self.post("/" + reread["id"] + "/start").status_code, 200)
+        self.app.state.reference_studies._threads[reread["id"]].join(timeout=15)
+        reviewed = self.client.get("/api/reference-studies/" + reread["id"] + "/export").json()
+        self.assertEqual(reviewed["state"], "succeeded", reviewed.get("error"))
+        self.assertEqual(len(self.gateway.calls), calls_before + 1)
+        self.assertEqual(len(reviewed["results"]), 1)
+        self.assertEqual(reviewed["results"][0]["temporal_mode"], "retrospective")
+        self.assertEqual(reviewed["results"][0]["refs"][0]["start_char"], 1)
+        self.assertEqual(reviewed["results"][0]["refs"][0]["end_char"], 20)
+        self.assertFalse(reviewed["coverage"]["sources"][0]["whole_current_file"])
+        self.assertEqual(self.client.get(url).json(), original)
+        self.assertEqual({path.relative_to(study_root): path.read_bytes() for path in study_root.rglob("*") if path.is_file()}, saved)
+        self.assertEqual(self.project.fingerprint(), self.canon)
 
 
 if __name__ == "__main__":

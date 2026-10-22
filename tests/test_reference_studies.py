@@ -12,10 +12,11 @@ from unittest.mock import patch
 from vibenovel.core.files import digest, json_bytes, read_json
 from vibenovel.core.locking import ConflictError
 from vibenovel.core.reference_books import ReferenceBookStore
-from vibenovel.core.reference_studies import ReferenceStudiesStore, resolve_response_refs, validate_comparison
+from vibenovel.core.reference_studies import (ReferenceStudiesStore, compile_graphs,
+    resolve_response_refs, validate_comparison, validate_reading)
 from vibenovel.errors import VibeNovelError
 from vibenovel.studio.providers import GenerationResult
-from vibenovel.studio.reference_studies import ReferenceStudiesManager
+from vibenovel.studio.reference_studies import ReferenceStudiesManager, study_prompt
 
 
 class Gateway:
@@ -53,6 +54,67 @@ class Gateway:
         if self.bad:
             result["events"][0]["source_refs"] = [{**aliases[0], "quote": "从未发送的句子"}]
         return GenerationResult(json.dumps(result, ensure_ascii=False), usage={"total_tokens": 100})
+
+
+class GraphKnowledgeLabelTests(unittest.TestCase):
+    def character(self, name, key="c1"):
+        return {"key": key, "name": name, "goal": "核实消息", "state": "等待", "source_refs": []}
+
+    def checkpoint(self, index, characters, subject="c1"):
+        return {"node_id": "read-%05d" % (index + 1), "read_index": index, "result": {
+            "characters": characters,
+            "knowledge": [{"subject": subject, "fact": "本段消息", "status": "known", "source_refs": []}],
+        }}
+
+    def knowledge(self, graphs):
+        return [item for item in graphs["characters"]["nodes"] if item["kind"] == "knowledge"]
+
+    def test_current_character_name_is_displayed_without_changing_entity_keys(self):
+        row = self.checkpoint(0, [self.character("陶宁"), self.character("周岚", "c2")])
+        row["result"]["relationships"] = [{"from": "c1", "to": "c2", "change": "询问", "source_refs": []}]
+        original = copy.deepcopy(row)
+        graphs = compile_graphs([row])
+        self.assertEqual(self.knowledge(graphs)[0]["label"], "陶宁：本段消息")
+        self.assertEqual(graphs["characters"]["edges"][0]["from"], "read-00001:character:c1")
+        self.assertEqual(graphs["characters"]["edges"][0]["to"], "read-00001:character:c2")
+        self.assertEqual(graphs["characters"]["edges"][1]["from"], "read-00001:character:c1")
+        self.assertEqual(row, original)
+
+    def test_previous_checkpoint_name_is_used_when_not_redeclared(self):
+        graphs = compile_graphs([self.checkpoint(0, [self.character("陶宁")]), self.checkpoint(1, [])])
+        self.assertEqual([item["label"] for item in self.knowledge(graphs)], ["陶宁：本段消息", "陶宁：本段消息"])
+        self.assertEqual(graphs["characters"]["edges"][-1]["from"], "read-00001:character:c1")
+        self.assertEqual(graphs["characters"]["edges"][-1]["to"], "read-00002:knowledge:0")
+
+    def test_later_identity_never_relabels_earlier_checkpoint(self):
+        earlier = self.checkpoint(0, [self.character("陌生人")])
+        first_graph = compile_graphs([earlier])
+        complete = compile_graphs([earlier, self.checkpoint(1, [self.character("陶宁")]), self.checkpoint(2, [])])
+        labels = [item["label"] for item in self.knowledge(complete)]
+        self.assertEqual(labels, ["陌生人：本段消息", "陶宁：本段消息", "陶宁：本段消息"])
+        self.assertEqual(self.knowledge(complete)[0], self.knowledge(first_graph)[0])
+
+    def test_reader_keeps_reader_label(self):
+        graphs = compile_graphs([self.checkpoint(0, [self.character("陶宁")], subject="reader")])
+        self.assertEqual(self.knowledge(graphs)[0]["label"], "读者：本段消息")
+
+    def test_prompt_requires_character_key_and_validation_rejects_display_name(self):
+        prompt = study_prompt("reading", "知情变化", [])
+        self.assertIn("knowledge.subject只能填写字面量reader", prompt)
+        self.assertIn("characters.key/先前known_character_keys", prompt)
+        self.assertIn("不能填写人物姓名", prompt)
+        ref = {"book_id": "a" * 32, "edition_id": "b" * 32, "chapter_id": "c" * 32,
+               "start_char": 0, "end_char": 2, "quote": "消息"}
+        character = self.character("陶宁")
+        character["source_refs"] = [ref]
+        value = {"summary": "本段观察", "carry_forward": "仅当前已知", "events": [],
+                 "characters": [character], "relationships": [],
+                 "knowledge": [{"subject": "c1", "fact": "得知消息", "status": "known", "source_refs": [ref]}],
+                 "threads": [], "rhythm": [], "methods": [], "gaps": []}
+        self.assertEqual(validate_reading(value, [ref])["knowledge"][0]["subject"], "c1")
+        value["knowledge"][0]["subject"] = "陶宁"
+        with self.assertRaisesRegex(VibeNovelError, "知情主体"):
+            validate_reading(value, [ref])
 
 
 class StudyTests(unittest.TestCase):
@@ -114,6 +176,21 @@ class StudyTests(unittest.TestCase):
                 self.manager.control(study["id"], "start")
         self.assertEqual(self.gateway.calls, [])
         self.assertEqual(self.manager.store.load(study["id"])["plan_hash"], frozen)
+
+    def test_length_response_does_not_publish_a_complete_checkpoint(self):
+        generate = self.gateway.generate
+        def truncated(*args):
+            result = generate(*args)
+            result.finish_reason = "length"
+            return result
+        self.gateway.generate = truncated
+        final = self.run_study(self.create())
+        self.assertEqual(final["state"], "failed")
+        self.assertEqual(len(self.gateway.calls), 1)
+        response = self.manager.response(final["id"], "read-00001")
+        self.assertEqual(response["finish_reason"], "length")
+        self.assertTrue(response["text"])
+        self.assertEqual(self.manager.store.export_verified(final["id"])["results"], [])
 
     def test_late_withdrawal_blocks_publication_and_never_replays(self):
         def withdraw():

@@ -80,12 +80,22 @@ import MultiModelWorkspace, { JobRouteDetails } from "./MultiModelWorkspace";
 import CreationWorkspace from "./CreationWorkspace";
 import LibraryWorkspace from "./LibraryWorkspace";
 import TaskMaterialPreview from "./TaskMaterialPreview";
+import TaskMaterialPicker from "./TaskMaterialPicker";
 import { TaskReferenceContext } from "./TaskReferenceContext";
-import { consumeTaskReference } from "./taskReferenceHelpers";
+import { consumeTaskReference, referenceUsedBySelection, retireReferenceRetrieval, taskReferenceIdentity } from "./taskReferenceHelpers";
 import type { TaskReference } from "./TaskReferenceContext";
 import { libraryPreviewHash, libraryTaskConfiguration } from "./libraryHelpers";
 import { jobRetryGate } from "./jobRetryGate";
-import { mergeTaskMaterials } from "./taskMaterialHelpers";
+import { materialIds, mergeTaskMaterials, retrievalMaterialCount, taskMaterialPurpose } from "./taskMaterialHelpers";
+import { encodingRequest, importedSourcePath, initialImportEncoding } from "./importSourceHelpers";
+import type { ImportEncoding, ImportIntent } from "./importSourceHelpers";
+import { originalSelectionRange, savedSelectionMatches } from "./textSelection";
+import type { BoundTextSelection } from "./textSelection";
+import EditorialTaskScopePreview, { editorialGoalOptions } from "./EditorialTaskScopePreview";
+import { suggestProposalTarget } from "./proposalTarget";
+import ChaptersWorkspace from "./ChaptersWorkspace";
+import { nextDraftPath } from "./chapterManagement";
+import { ConfirmationHost, requestConfirmation } from "./confirm";
 
 type Area =
   | "dashboard"
@@ -99,12 +109,14 @@ type Area =
   | "library"
   | "models"
   | "outlines"
+  | "chapters"
   | "editor"
   | "approvals"
   | "memory"
   | "tasks";
 type ProposalDraft = {
   target: string;
+  targetNote: string;
   content: string;
   before: string;
   expected_hash: string | null;
@@ -118,6 +130,7 @@ const navItems = [
   { id: "characters", label: "人物与世界", icon: Library, group: "故事设计" },
   { id: "timeline", label: "时间线与伏笔", icon: Layers3, group: "故事设计" },
   { id: "style", label: "写作风格", icon: Feather, group: "故事设计" },
+  { id: "chapters", label: "章节管理", icon: BookOpen, group: "写作校订" },
   { id: "editor", label: "章节写作", icon: PenLine, group: "写作校订" },
   { id: "analysis", label: "审稿与检查", icon: CheckCheck, group: "写作校订" },
   { id: "manuscript", label: "已有小说修订", icon: GitCompareArrows, group: "写作校订" },
@@ -150,12 +163,25 @@ export default function App() {
   const [project, setProject] = useState<Project | null>(null);
   const [area, setArea] = useState<Area>("dashboard");
   const [libraryTarget, setLibraryTarget] = useState<{ view: "all" | "sources" | "method" | "retrieval"; entry?: string; nonce: number }>({ view: "all", nonce: 0 });
-  const [taskPreview, setTaskPreview] = useState<{ body: Record<string, unknown>; route: Record<string, unknown>; novelId: string; reference: TaskReference; identity: string } | null>(null);
+  const [taskPreview, setTaskPreview] = useState<{ body: Record<string, unknown>; route: Record<string, unknown>; novelId: string; reference: TaskReference; identity: string; editorialScope?: { selection: { start_char: number; end_char: number } | null; quote: string; characters: number } } | null>(null);
   const [taskUncertain, setTaskUncertain] = useState(false);
   const [taskReference, setTaskReference] = useState<TaskReference>(null);
-  const activeReference = taskReference?.novelId === project?.novel_id ? taskReference?.selection : null;
+  const activeReferenceTicket = taskReference?.novelId === project?.novel_id ? taskReference : null;
+  const activeReference = activeReferenceTicket?.selection || null;
+  const [editorMaterialSelection, setEditorMaterialSelection] = useState<Record<string, unknown> | null>(null);
+  const [editorMaterialsOpen, setEditorMaterialsOpen] = useState(false);
+  const previousEditorReference = useRef<TaskReference>(null);
+  const currentEditorMaterials = retireReferenceRetrieval(editorMaterialSelection, previousEditorReference.current, activeReferenceTicket);
+  const effectiveEditorMaterials = currentEditorMaterials ?? activeReference;
+  const editorReferenceIdentity = taskReferenceIdentity(activeReferenceTicket);
+  useEffect(() => {
+    const previous = previousEditorReference.current;
+    previousEditorReference.current = activeReferenceTicket;
+    setEditorMaterialSelection((current) => retireReferenceRetrieval(current, previous, activeReferenceTicket));
+  }, [editorReferenceIdentity]);
   const [planningPath, setPlanningPath] = useState("");
   const [planningSource, setPlanningSource] = useState("");
+  const [planningSourceRequest, setPlanningSourceRequest] = useState<{ path: string; nonce: number } | null>(null);
   const [planningForm, setPlanningForm] = useState<{ novelId: string; draft: PlanningFormDraft } | null>(null);
   const [libraryReturn, setLibraryReturn] = useState<"planning" | null>(null);
   const [childDirty, setChildDirty] = useState(false);
@@ -180,6 +206,9 @@ export default function App() {
   const [showNewDoc, setShowNewDoc] = useState(false);
   const [newPath, setNewPath] = useState("");
   const [newDocContent, setNewDocContent] = useState("");
+  const newDocumentIdentity = JSON.stringify([showNewDoc, newPath, newDocContent]);
+  const newDocumentIdentityRef = useRef(newDocumentIdentity);
+  newDocumentIdentityRef.current = newDocumentIdentity;
   const [showHistory, setShowHistory] = useState(false);
   const [versions, setVersions] = useState<Version[]>([]);
   const [versionId, setVersionId] = useState("");
@@ -192,13 +221,19 @@ export default function App() {
   const [showGuide, setShowGuide] = useState(false);
   const [taskKind, setTaskKind] = useState("expand_outline");
   const [instruction, setInstruction] = useState("");
+  const [editorSelection, setEditorSelection] = useState<BoundTextSelection | null>(null);
+  const [editorGoals, setEditorGoals] = useState<string[]>(["preserve_voice"]);
+  const [editorIntensity, setEditorIntensity] = useState<"conservative" | "standard" | "deep">("conservative");
   const [planPath, setPlanPath] = useState("");
   const [briefMode, setBriefMode] = useState<"compact" | "full">("compact");
   const [selectedJob, setSelectedJob] = useState("");
   const [repairJob, setRepairJob] = useState<Job | null>(null);
+  const [responseJob, setResponseJob] = useState<Job | null>(null);
   const [candidate, setCandidate] = useState("");
   const [showSources, setShowSources] = useState(false);
-  const [importEncoding, setImportEncoding] = useState("auto");
+  const [importEncoding, setImportEncoding] = useState<ImportEncoding>(initialImportEncoding);
+  const [importIntent, setImportIntent] = useState<ImportIntent>("general");
+  const [latestImport, setLatestImport] = useState<Imported | null>(null);
   const [exportRange, setExportRange] = useState(false);
   const [rangeStart, setRangeStart] = useState("");
   const [rangeEnd, setRangeEnd] = useState("");
@@ -213,11 +248,18 @@ export default function App() {
   const proposalSession = useRef(0);
   const operationId = useRef(0);
   const operations = useRef(new Map<number, string>());
-  const editorTaskIdentity = JSON.stringify([project?.novel_id, doc?.path, doc?.hash, source, taskKind, instruction.trim(), planPath, briefMode, documents.find(item => item.path === planPath)?.hash, activeReference, taskReference?.id]);
+  const editorDocumentHash = documents.find((item) => item.path === doc?.path)?.hash;
+  const editorTaskIdentity = JSON.stringify([project?.novel_id, doc?.path, doc?.hash, source, taskKind, instruction.trim(), planPath, briefMode, documents.find(item => item.path === planPath)?.hash, effectiveEditorMaterials, activeReferenceTicket?.id, editorSelection, editorGoals, editorIntensity, editorDocumentHash]);
   const editorTaskIdentityRef = useRef(editorTaskIdentity);
   editorTaskIdentityRef.current = editorTaskIdentity;
   useEffect(() => { if (!taskUncertain) setTaskPreview(null); }, [editorTaskIdentity, taskUncertain]);
   const dirty = !!doc && source !== doc.content;
+  const editorialTask = taskKind === "review" || taskKind === "rewrite";
+  const editorDocumentCurrent = !!doc && editorDocumentHash === doc.hash;
+  const editorSelectionValid = savedSelectionMatches(editorSelection, project?.novel_id, doc, source, editorDocumentHash);
+  useEffect(() => {
+    setEditorSelection((current) => current && (current.novelId !== project?.novel_id || current.path !== doc?.path) ? null : current);
+  }, [project?.novel_id, doc?.path]);
   const locked = !!doc && (doc.readonly || readonlyPath(doc.path));
   const pendingCount = approvals.filter(
     (item) => item.state === "pending",
@@ -230,17 +272,26 @@ export default function App() {
       setNotice({ text, type }),
     [],
   );
-  const allowLeave = useCallback(
-    () =>
-      (!dirty && !childDirty) ||
-      window.confirm(
-        "当前页面有未保存的修改。离开可能放弃这些修改，仍要继续吗？",
-      ),
-    [dirty, childDirty],
-  );
-  function navigate(next: Area): boolean {
+  const leaveIdentity = JSON.stringify([area, project?.novel_id, doc?.path, doc?.hash, source, childDirty]);
+  const leaveRevision = useRef({ identity: leaveIdentity, revision: 0 });
+  if (leaveRevision.current.identity !== leaveIdentity) {
+    leaveRevision.current = { identity: leaveIdentity, revision: leaveRevision.current.revision + 1 };
+  }
+  const allowLeave = useCallback(async (): Promise<boolean> => {
+    if (!dirty && !childDirty) return true;
+    const expected = leaveRevision.current.revision;
+    const accepted = await requestConfirmation("当前页面有未保存的修改。放弃修改后会离开当前页面，已保存的内容保持不变。");
+    // Confirmation is asynchronous: an older prompt cannot discard inputs
+    // belonging to a page or document that changed while the author decided.
+    if (accepted && leaveRevision.current.revision !== expected) {
+      notify("确认期间页面或文稿已变化，已保留当前修改。请重新选择要进行的操作。", "error");
+      return false;
+    }
+    return accepted;
+  }, [dirty, childDirty, notify]);
+  async function navigate(next: Area): Promise<boolean> {
     if (next === area) return true;
-    if (!allowLeave()) return false;
+    if (!await allowLeave()) return false;
     if (next !== "library") setLibraryReturn(null);
     setArea(next);
     return true;
@@ -350,7 +401,7 @@ export default function App() {
   }, [project, documents, refresh]);
 
   async function selectProject(id: string, approved = false) {
-    if (!approved && !allowLeave()) return;
+    if (!approved && !await allowLeave()) return;
     currentProject.current = id;
     docRequest.current += 1;
     setDoc(null);
@@ -359,9 +410,20 @@ export default function App() {
     setApprovals([]);
     setJobs([]);
     setImports([]);
+    setEditorMaterialSelection(null);
+    setEditorMaterialsOpen(false);
+    setEditorSelection(null);
+    setEditorGoals(["preserve_voice"]);
+    setEditorIntensity("conservative");
+    previousEditorReference.current = null;
+    setShowSources(false);
+    setImportEncoding(initialImportEncoding());
+    setImportIntent("general");
+    setLatestImport(null);
     setArea("dashboard");
     setPlanningPath("");
     setPlanningSource("");
+    setPlanningSourceRequest(null);
     setPlanningForm(null); setLibraryReturn(null);
     setRepairJob(null);
     setCandidate("");
@@ -395,7 +457,7 @@ export default function App() {
     line?: number,
     expectedHash?: string,
   ): Promise<boolean> {
-    if (!project || ((path !== doc?.path || discard || childDirty) && !allowLeave())) return false;
+    if (!project || ((path !== doc?.path || discard || childDirty) && !await allowLeave())) return false;
     if (path === "outlines/source/creative-brief.json" || path === "reviews/creation-selection.json") {
       setArea("creation"); return true;
     }
@@ -509,7 +571,7 @@ export default function App() {
       title: String(fields.get("title") || "").trim() || "未命名作品",
       genre: String(fields.get("genre")),
     };
-    if (!allowLeave()) return;
+    if (!await allowLeave()) return;
     const sourceAtStart = sourceRef.current;
     const request = docRequest.current;
     const id = currentProject.current;
@@ -546,14 +608,16 @@ export default function App() {
   }
   function newDocument() {
     setNewPath(
-      area === "outlines" ? "outlines/proposals/book.md" : "drafts/ch001.md",
+      area === "outlines" ? "outlines/proposals/book.md" : nextDraftPath(documents),
     );
     setNewDocContent("");
     setShowNewDoc(true);
   }
-  function closeNewDocument() {
+  async function closeNewDocument() {
     if (busy === "new-document") return;
-    if (newDocContent.trim() && !window.confirm("新文稿的内容尚未保存，确定放弃并关闭吗？")) return;
+    const expected = newDocumentIdentityRef.current;
+    if (newDocContent.trim() && !await requestConfirmation("新文稿的内容尚未保存，确定放弃并关闭吗？")) return;
+    if (newDocumentIdentityRef.current !== expected) return;
     setShowNewDoc(false);
   }
   function adaptImported() {
@@ -564,7 +628,7 @@ export default function App() {
   }
   async function createDocument(event: FormEvent) {
     event.preventDefault();
-    if (!project || !allowLeave()) return;
+    if (!project || !await allowLeave()) return;
     const request = ++docRequest.current;
     const id = project.novel_id;
     const sourceAtStart = sourceRef.current;
@@ -590,8 +654,27 @@ export default function App() {
       notify(result.content.trim() ? "内容已保存为独立工作文稿。" : "已创建空白文稿");
     });
   }
+  function openImport(intent: ImportIntent = "general") {
+    setImportEncoding(initialImportEncoding());
+    setImportIntent(intent);
+    setLatestImport(null);
+    setShowSources(true);
+  }
+  async function useImportedOutline(item: Imported) {
+    if (!project || (!planningArea && !await allowLeave())) return;
+    const path = importedSourcePath(item);
+    setPlanningSource(path);
+    setPlanningSourceRequest((current) => ({ path, nonce: (current?.nonce || 0) + 1 }));
+    setPlanningForm((current) => current?.novelId === project.novel_id ? { ...current, draft: { ...current.draft, sourcePath: path } } : current);
+    setShowSources(false);
+    setArea("planning");
+    notify(`已选择大纲「${item.original_name}」。请核对本批章节与作者要求，再预览规划包。`);
+  }
   async function importFile(file: File) {
     if (!project) return;
+    setLatestImport(null);
+    const id = project.novel_id;
+    const encoding = importEncoding;
     if (!/\.(md|txt)$/i.test(file.name)) {
       notify("请选择 .md 或 .txt 文本文件", "error");
       return;
@@ -607,31 +690,37 @@ export default function App() {
         reader.onerror = () => reject(new Error("无法读取文件"));
         reader.readAsDataURL(file);
       });
-      await api(`${projectUrl(project.novel_id)}/imports`, "POST", {
+      if (currentProject.current !== id) return;
+      const receipt = await api<{ import_id: string; metadata: { original_filename: string; source_sha256: string; extracted_sha256: string; imported_at: string } }>(`${projectUrl(id)}/imports`, "POST", {
         filename: file.name,
         content_base64: data,
-        ...(importEncoding !== "auto" ? { encoding: importEncoding } : {}),
+        ...encodingRequest(encoding),
       });
-      await refresh(project.novel_id);
+      await refresh(id);
+      if (currentProject.current !== id) return;
+      const imported: Imported = { import_id: receipt.import_id, original_name: receipt.metadata.original_filename, source_hash: receipt.metadata.source_sha256, extracted_hash: receipt.metadata.extracted_sha256, created_at: receipt.metadata.imported_at };
+      setLatestImport(imported);
       setShowSources(true);
-      notify("原始材料已导入，可在来源资料中查看");
+      notify(`已导入「${imported.original_name}」，原件与提取文本均保留。`);
     });
   }
-  async function startProposal(target?: string, content?: string) {
+  async function startProposal(target?: string, content?: string, targetNote = "") {
     if (!project) return;
-    const destination = target || doc?.path;
-    if (!destination) return;
+    const destination = target ?? doc?.path;
+    if (destination === undefined) return;
     const request = docRequest.current;
     const id = project.novel_id;
     const session = ++proposalSession.current;
     await act("proposal", async () => {
       let previous: NovelDocument | null = null;
-      try {
-        previous = await api<NovelDocument>(
-          `${projectUrl(project.novel_id)}/document?path=${encodeURIComponent(destination)}`,
-        );
-      } catch (error) {
-        if (!(error instanceof ApiError && error.status === 404)) throw error;
+      if (destination) {
+        try {
+          previous = await api<NovelDocument>(
+            `${projectUrl(project.novel_id)}/document?path=${encodeURIComponent(destination)}`,
+          );
+        } catch (error) {
+          if (!(error instanceof ApiError && error.status === 404)) throw error;
+        }
       }
       if (
         currentProject.current !== id ||
@@ -641,6 +730,7 @@ export default function App() {
         return;
       setProposal({
         target: destination,
+        targetNote,
         content: content ?? source,
         before: previous?.content || "",
         expected_hash: previous?.hash || null,
@@ -707,14 +797,11 @@ export default function App() {
     setVerifiedTarget("");
   }
   function formalTarget() {
-    if (!doc) return "";
-    if (isOutline(doc.path)) return `outlines/approved/${leaf(doc.path)}`;
-    const chapter = leaf(doc.path).match(/ch(\d+)/i)?.[1] || "1";
-    return `chapters/ch${chapter.padStart(3, "0")}.md`;
+    return suggestProposalTarget(doc?.path || "", jobs);
   }
   async function submitProposal(event: FormEvent) {
     event.preventDefault();
-    if (!project || !proposal || verifiedTarget !== proposal.target) return;
+    if (!project || !proposal || !proposal.target.trim() || verifiedTarget !== proposal.target) return;
     await act("submit-proposal", async () => {
       const result = await api<Approval>(
         `${projectUrl(project.novel_id)}/approvals`,
@@ -757,7 +844,7 @@ export default function App() {
     });
   }
   async function applyProposal(item: Approval) {
-    if (!project || !allowLeave()) return;
+    if (!project || !await allowLeave()) return;
     const id = project.novel_id;
     const request = docRequest.current;
     const sourceAtStart = sourceRef.current;
@@ -802,7 +889,7 @@ export default function App() {
     });
   }
   async function restoreVersion() {
-    if (!project || !doc || !versionId || locked || !allowLeave()) return;
+    if (!project || !doc || !versionId || locked || !await allowLeave()) return;
     const request = docRequest.current;
     const id = project.novel_id;
     const sourceAtStart = source;
@@ -821,6 +908,25 @@ export default function App() {
       notify("已恢复所选版本，恢复前的文字仍保留在历史中");
     });
   }
+  function captureEditorSelection() {
+    if (!project || !doc || busy || taskUncertain) return;
+    const field = textarea.current;
+    if (dirty || !editorDocumentCurrent) { notify("文稿尚未保存或已变化。请先保存或重新读取，再指定选区。", "error"); return; }
+    if (preview || !field || field.selectionEnd <= field.selectionStart) { notify("请切换到源码，在正文中选中文字，再点击使用当前选区。", "error"); return; }
+    const range = originalSelectionRange(doc.content, field.selectionStart, field.selectionEnd);
+    const bound = { novelId: project.novel_id, path: doc.path, hash: doc.hash, ...range };
+    if (!savedSelectionMatches(bound, project.novel_id, doc, source, editorDocumentHash)) { notify("当前选区不属于这份已保存文稿，请重新选择。", "error"); return; }
+    setEditorSelection(bound);
+    setTaskPreview(null);
+    notify(`已固定选区 [${range.start_char}, ${range.end_char})，区间之外保留原文。`);
+  }
+  async function openEditorMaterialLibrary() {
+    if (!project || !await allowLeave()) return;
+    setEditorMaterialsOpen(false);
+    setLibraryReturn(null);
+    setLibraryTarget({ view: "retrieval", nonce: Date.now() });
+    setArea("library");
+  }
   async function startTask(event: FormEvent) {
     event.preventDefault();
     if (!project || !doc || !selectedProvider?.available || busy) return;
@@ -828,12 +934,17 @@ export default function App() {
       notify("请先保存当前文稿，让任务使用明确的已保存版本。", "error");
       return;
     }
+    if (editorialTask && (!editorDocumentCurrent || editorSelection && !editorSelectionValid || !editorGoals.length)) {
+      notify(!editorGoals.length ? "请至少选择一项编辑目标。" : "文稿或选区已变化，请重新读取并指定选区，或明确切换为整章处理。", "error");
+      return;
+    }
     const identity = editorTaskIdentity;
     await act("task-preview", async () => {
-      const body = { ...(activeReference ? {library_selection: activeReference}: {}), kind: taskKind, provider: "api", document_path: doc.path, document_hash: doc.hash, instruction: instruction.trim(), idempotency_key: crypto.randomUUID(), ...(taskKind === "draft" ? { plan_path: planPath, brief_mode: briefMode, plan_hash: approvedPlans.find((item) => item.path === planPath)?.hash } : {}) };
+      const selectedRange = editorialTask && editorSelection ? { start_char: editorSelection.start_char, end_char: editorSelection.end_char } : null;
+      const body = { ...(effectiveEditorMaterials !== null ? {library_selection: effectiveEditorMaterials}: {}), kind: taskKind, provider: "api", document_path: doc.path, document_hash: doc.hash, instruction: instruction.trim(), idempotency_key: crypto.randomUUID(), ...(editorialTask ? { editorial: { goals: editorGoals, intensity: editorIntensity }, ...(selectedRange ? { selection: selectedRange } : {}) } : {}), ...(taskKind === "draft" ? { plan_path: planPath, brief_mode: briefMode, plan_hash: approvedPlans.find((item) => item.path === planPath)?.hash } : {}) };
       const route = await api<Record<string, unknown>>(`${projectUrl(project.novel_id)}/jobs/preview`, "POST", body);
       if (editorTaskIdentityRef.current !== identity) return;
-      setTaskPreview({ body, route, novelId: project.novel_id, reference:taskReference?.novelId === project.novel_id ? taskReference : null, identity }); setTaskUncertain(false);
+      setTaskPreview({ body, route, novelId: project.novel_id, reference: referenceUsedBySelection(activeReferenceTicket, effectiveEditorMaterials), identity, ...(editorialTask ? { editorialScope: { selection: selectedRange, quote: selectedRange ? Array.from(doc.content).slice(selectedRange.start_char, selectedRange.end_char).join("") : "", characters: Array.from(doc.content).length } } : {}) }); setTaskUncertain(false);
     });
   }
   async function confirmTask() {
@@ -852,13 +963,13 @@ export default function App() {
     });
   }
   async function openLibrary(novelId: string, entryId?: string) {
-    if (!allowLeave()) return;
+    if (!await allowLeave()) return;
     if (project?.novel_id !== novelId) await selectProject(novelId, true);
     if (currentProject.current !== novelId) return;
     setLibraryTarget({ view: entryId ? "all" : "method", entry: entryId, nonce: Date.now() }); setArea("library");
   }
   async function openLibraryTasks(novelId: string, jobId?: string) {
-    if (!allowLeave()) return;
+    if (!await allowLeave()) return;
     if (project?.novel_id !== novelId) await selectProject(novelId, true);
     if (currentProject.current !== novelId) return;
     setSelectedJob(jobId || ""); setArea("tasks");
@@ -966,7 +1077,7 @@ export default function App() {
   const selectedTask = jobs.find((item) => item.id === selectedJob) || jobs[0];
   const retryBlocked = selectedTask ? jobRetryGate(selectedTask, jobs) : null;
   async function returnToTaskInput(job: Job) {
-    if (!project || !allowLeave()) return;
+    if (!project || !await allowLeave()) return;
     if (job.workflow_id) { setArea("models"); return; }
     if (job.kind === "generate_story_outline") { setArea("creation"); return; }
     if (["analyze_reference", "extract_methods"].includes(job.kind)) { await openLibrary(project.novel_id); return; }
@@ -979,6 +1090,10 @@ export default function App() {
       const opened = await openDocument(job.request.document_path);
       if (!opened || currentProject.current !== novelId) return;
       setTaskKind(job.kind); setInstruction(job.request.instruction || ""); setRightOpen(true);
+      setEditorMaterialSelection(job.request.library_selection || {});
+      setEditorSelection(job.request.selection ? { novelId, path: job.request.document_path, hash: job.request.document_hash || "", ...job.request.selection } : null);
+      setEditorGoals(job.request.editorial ? job.request.editorial.goals.filter((goal) => editorialGoalOptions.some((option) => option.id === goal)) : ["preserve_voice"]);
+      setEditorIntensity(job.request.editorial?.intensity || "conservative");
       setPlanPath(job.request.plan_path || ""); setBriefMode(job.request.brief_mode || "compact");
     } else { setArea("planning"); }
   }
@@ -1007,7 +1122,7 @@ export default function App() {
       </a>
       {activeReference && <div className="task-reference-banner" role="status">已固定检索资料，供本书下一次任务使用。<button className="text-button" onClick={() => setTaskReference(null)}>取消本次选用</button></div>}
       <header className="topbar">
-        <div className="brand">
+        <div className="brand" aria-label="VibeNovel Studio">
           <div className="brand-mark">
             <Feather size={21} strokeWidth={1.7} />
           </div>
@@ -1047,7 +1162,7 @@ export default function App() {
           />
           {ready ? "本地工作区" : fatal ? "连接失败" : "正在连接"}
         </span>
-        <button className="button small secondary" onClick={() => setShowGuide(true)}><BookOpen size={14} />使用手册</button>
+        <button className="button small secondary guide-button" aria-label="使用手册" title="使用手册" onClick={() => setShowGuide(true)}><BookOpen size={14} /><span>使用手册</span></button>
         <button
           className="button small secondary export-button"
           disabled={!project || !!busy}
@@ -1209,8 +1324,8 @@ export default function App() {
         <div className="sidebar-bottom">
           <button onClick={() => setShowSettings(true)}><Settings2 size={16} /><span>模型与 API 设置</span><ArrowUpRight size={13} /></button>
           <button
-            onClick={() => {
-              if (!allowLeave()) return; setLibraryTarget({ view: "sources", nonce: Date.now() }); setArea("library");
+            onClick={async () => {
+              if (!await allowLeave()) return; setLibraryTarget({ view: "sources", nonce: Date.now() }); setArea("library");
             }}
           >
             <FolderOpen size={16} />
@@ -1275,7 +1390,7 @@ export default function App() {
             <p>正在打开作者工作台…</p>
           </div>
         ) : area === "library" ? (
-          <LibraryWorkspace key={`${project?.novel_id || "personal"}-${libraryTarget.nonce}`} project={project} projects={projects} initialView={libraryTarget.view} initialEntry={libraryTarget.entry} onLibrary={(id, entry) => void openLibrary(id, entry)} onSettings={() => setShowSettings(true)} onDirtyChange={setChildDirty} onJob={(job, id) => { if (project?.novel_id === id) setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)]); }} onTasks={(id, jobId) => void openLibraryTasks(id, jobId)} onLegacySources={() => setShowSources(true)} onUseRetrieval={(selection) => { if (!project) return; setTaskReference({id:crypto.randomUUID(),novelId: project.novel_id, selection}); if (libraryReturn === "planning" && planningForm?.novelId === project.novel_id) { setPlanningForm({ ...planningForm, draft: { ...planningForm.draft, materialSelection: mergeTaskMaterials(planningForm.draft.materialSelection, selection) } }); setLibraryReturn(null); setArea("planning"); } notify("已固定检索资料；规划输入已保留，可在发送预览中核对。"); }} />
+          <LibraryWorkspace key={`${project?.novel_id || "personal"}-${libraryTarget.nonce}`} project={project} projects={projects} initialView={libraryTarget.view} initialEntry={libraryTarget.entry} onLibrary={(id, entry) => void openLibrary(id, entry)} onSettings={() => setShowSettings(true)} onDirtyChange={setChildDirty} onJob={(job, id) => { if (project?.novel_id === id) setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)]); }} onTasks={(id, jobId) => void openLibraryTasks(id, jobId)} onLegacySources={() => openImport()} onUseRetrieval={(selection) => { if (!project) return; setTaskReference({id:crypto.randomUUID(),novelId: project.novel_id, selection}); setEditorMaterialSelection((current) => mergeTaskMaterials(current, selection)); if (libraryReturn === "planning" && planningForm?.novelId === project.novel_id) { setPlanningForm({ ...planningForm, draft: { ...planningForm.draft, materialSelection: mergeTaskMaterials(planningForm.draft.materialSelection, selection) } }); setLibraryReturn(null); setArea("planning"); } notify("已固定检索资料；规划输入已保留，可在发送预览中核对。"); }} />
         ) : !project ? (
           <div className="onboarding">
             <div className="onboarding-kicker">
@@ -1428,7 +1543,7 @@ export default function App() {
                   </button>
                   <button
                     className="button secondary"
-                    onClick={() => fileInput.current?.click()}
+                    onClick={() => openImport("planning")}
                     disabled={busy === "import"}
                   >
                     <Upload size={15} />
@@ -1469,7 +1584,7 @@ export default function App() {
                   className="text-button"
                   onClick={() => {
                     setArea("editor");
-                    setNewPath("drafts/ch001.md");
+                    setNewPath(nextDraftPath(documents));
                     setNewDocContent("");
                     setShowNewDoc(true);
                   }}
@@ -1524,17 +1639,23 @@ export default function App() {
               <span>·</span>导入内容作为参考材料
             </div>
           </div>
+        ) : area === "chapters" ? (
+          <ChaptersWorkspace key={project.novel_id} project={project} documents={documents} jobs={jobs} approvals={approvals} busy={!!busy} unsavedPath={dirty ? doc?.path : undefined}
+            onOpen={(item) => { void openDocument(item.path, true, false, undefined, item.hash).then((opened) => { if (opened && item.path.startsWith("chapters/")) setPreview(true); }); }}
+            onNew={newDocument} onExport={() => setExportRange(true)}
+            onRefresh={() => void act("chapters-refresh", () => refresh(project.novel_id))}
+            onApprovals={() => navigate("approvals")} />
         ) : area === "creation" ? (
           <CreationWorkspace key={project.novel_id} project={project} documents={documents} jobs={jobs}
             onChanged={() => refresh(project.novel_id)} onDirtyChange={setChildDirty}
             onSettings={() => setShowSettings(true)}
             onOpenDocument={(path) => void openDocument(path)}
-            onPlanning={(path) => { if (!allowLeave()) return; setPlanningForm(null); setPlanningSource(path); setPlanningPath(""); setArea("planning"); }}
+            onPlanning={async (path) => { if (!await allowLeave()) return; setPlanningForm(null); setPlanningSource(path); setPlanningPath(""); setArea("planning"); }}
             onJob={(job) => { setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)]); void refresh(project.novel_id); }} />
         ) : area === "models" ? (
-          <MultiModelWorkspace key={project.novel_id} project={project} documents={documents} onDirtyChange={setChildDirty} onSaved={async () => { const boot = await api<Bootstrap>("/bootstrap"); setBootstrap(boot); setToken(boot.csrf_token); await refresh(project.novel_id); }} onOpen={(path) => void openDocument(path)} onTask={(id) => { if (!navigate("tasks")) return; setSelectedJob(id); void refresh(project.novel_id); }} />
+          <MultiModelWorkspace key={project.novel_id} project={project} documents={documents} onDirtyChange={setChildDirty} onSaved={async () => { const boot = await api<Bootstrap>("/bootstrap"); setBootstrap(boot); setToken(boot.csrf_token); await refresh(project.novel_id); }} onOpen={(path) => void openDocument(path)} onTask={async (id) => { if (!await navigate("tasks")) return; setSelectedJob(id); void refresh(project.novel_id); }} />
         ) : area === "manuscript" ? (
-          <ManuscriptWorkspace key={project.novel_id} project={project} documents={documents} jobs={jobs} providers={bootstrap?.capabilities.providers || []} onSettings={() => setShowSettings(true)} onImport={() => fileInput.current?.click()} onRefresh={() => refresh(project.novel_id)} onOpen={(path, line, expectedHash) => void openDocument(path, true, false, line, expectedHash)} onJob={(job) => { setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)]); void refresh(project.novel_id); }} />
+          <ManuscriptWorkspace key={project.novel_id} project={project} documents={documents} imports={imports} jobs={jobs} providers={bootstrap?.capabilities.providers || []} onSettings={() => setShowSettings(true)} onImport={() => openImport("manuscript")} onRefresh={() => refresh(project.novel_id)} onOpen={(path, line, expectedHash) => void openDocument(path, true, false, line, expectedHash)} onJob={(job) => { setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)]); void refresh(project.novel_id); }} />
         ) : area === "analysis" ? (
           <AnalysisWorkspace key={project.novel_id} project={project} documents={documents} approvals={approvals} currentDocument={doc || undefined} unsavedPath={dirty ? doc?.path : undefined} onDirtyChange={setChildDirty} onOpen={(path, line, expectedHash) => void openDocument(path, true, false, line, expectedHash)} onRefresh={() => refresh(project.novel_id)} />
         ) : planningArea ? (
@@ -1542,6 +1663,7 @@ export default function App() {
             key={project.novel_id}
             project={project}
             documents={documents}
+            imports={imports}
             providers={bootstrap?.capabilities.providers || []}
             onSettings={() => setShowSettings(true)}
             jobs={jobs}
@@ -1549,18 +1671,19 @@ export default function App() {
             approvals={approvals}
             initialPath={planningPath}
             initialSourcePath={planningSource}
+            sourceSelection={planningSourceRequest}
             initialDraft={planningForm?.novelId === project.novel_id ? planningForm.draft : undefined}
-            onLibrary={(draft) => { setPlanningForm({ novelId: project.novel_id, draft }); setLibraryReturn("planning"); setLibraryTarget({ view: "retrieval", nonce: Date.now() }); setArea("library"); }}
+            onLibrary={(draft) => { setPlanningForm({ novelId: project.novel_id, draft }); setPlanningSourceRequest(null); setLibraryReturn("planning"); setLibraryTarget({ view: "retrieval", nonce: Date.now() }); setArea("library"); }}
             initialTab={area === "characters" ? "characters" : area === "timeline" ? "timeline" : area === "style" ? "style" : "overview"}
             onDirtyChange={setChildDirty}
-            onImport={() => fileInput.current?.click()}
-            onPaste={() => { if (!allowLeave()) return; setArea("outlines"); setNewPath("outlines/proposals/book.md"); setNewDocContent(""); setShowNewDoc(true); }}
+            onImport={() => openImport("planning")}
+            onPaste={async () => { if (!await allowLeave()) return; setArea("outlines"); setNewPath("outlines/proposals/book.md"); setNewDocContent(""); setShowNewDoc(true); }}
             onSource={(path, line) =>
               void openDocument(path, true, false, line)
             }
-            onTasks={(id) => {
+            onTasks={async (id) => {
+              if (!await navigate("tasks")) return;
               if (id) setSelectedJob(id);
-              setArea("tasks");
             }}
             onJob={(job) => {
               const id = project.novel_id;
@@ -1618,6 +1741,7 @@ export default function App() {
                     )}
                   </div>
                   <div className="toolbar-buttons">
+                    {area === "editor" && <button type="button" className="button small secondary" onClick={() => navigate("chapters")}><BookOpen size={14} />章节管理</button>}
                     <div className="segmented">
                       <button
                         className={!preview ? "selected" : ""}
@@ -1671,7 +1795,7 @@ export default function App() {
                         {!doc.path.startsWith("reviews/") && (
                           <button
                             className="button small secondary"
-                            onClick={() => void startProposal(formalTarget())}
+                            onClick={() => { const suggestion = formalTarget(); void startProposal(suggestion.target, undefined, suggestion.note); }}
                             disabled={!!busy || !source.trim()}
                           >
                             <ShieldCheck size={14} />
@@ -1810,7 +1934,7 @@ export default function App() {
                       {area === "outlines" && (
                         <button
                           className="button secondary"
-                          onClick={() => fileInput.current?.click()}
+                          onClick={() => openImport("planning")}
                         >
                           <Upload size={15} />
                           导入材料
@@ -2130,16 +2254,24 @@ export default function App() {
                         <p>{selectedTask.request.instruction}</p>
                       </div>
                     )}
+                    {selectedTask.request?.editorial && <div className="job-section"><h3>审稿／改写范围</h3><p>{selectedTask.request.selection ? `仅处理 Unicode 字符区间 [${selectedTask.request.selection.start_char}, ${selectedTask.request.selection.end_char})` : "整章：当前已保存文稿全文"} · 来源版本 {selectedTask.request.document_hash?.slice(0, 12)}</p><p>编辑目标：{selectedTask.request.editorial.goals.map((goal) => editorialGoalOptions.find((option) => option.id === goal)?.label || goal).join("、") || "按作者说明"} · 强度：{({conservative:"保守",standard:"标准",deep:"深入"})[selectedTask.request.editorial.intensity]}</p></div>}
                     {selectedTask.error && (
                       <div className="inline-error">
                         <CircleAlert size={16} />
                         {selectedTask.error}
                       </div>
                     )}
+                    {(selectedTask.response_problem || selectedTask.response_archived) && (
+                      <div className="repair-card">
+                        <div><CircleAlert size={18} /><strong>{selectedTask.response_archived ? "模型已返回，任务结果未成功发布" : selectedTask.response_repaired ? "原始响应未完成，已人工修复候选" : selectedTask.response_problem === "output_limit" ? "输出达到上限，候选未完整生成" : selectedTask.response_problem === "empty_text" ? "本次没有返回正文" : "模型未正常完成文本"}</strong></div>
+                        <p>{selectedTask.response_archived ? "返回内容与计费记录已保留。此内容仅供归档查看，不能作为当前有效结果、审批或定稿依据。查看不会重新调用模型。" : "原始响应与计费记录仍保留。此内容仅供检查，未自动成为完整草稿或定稿依据。"}</p>
+                        <button className="button secondary small" onClick={() => setResponseJob(selectedTask)}>查看原始响应（只读）<FileText size={14} /></button>
+                      </div>
+                    )}
                     {selectedTask.provider === "api" && selectedTask.kind === "build_blueprint" && selectedTask.state === "awaiting_input" && selectedTask.repair_candidate && (
                       <div className="repair-card">
                         <div><CircleAlert size={18} /><strong>规划 JSON 需要修正</strong></div>
-                        <p>结构或出处校验未通过，原始结果仍保留。修正后再次校验，无需重复调用模型。</p>
+                        <p>{selectedTask.response_problem ? "原始响应未完成。可由作者补齐后重新校验；保留原始响应，不会重复调用模型。" : "结构或出处校验未通过，原始结果仍保留。修正后再次校验，无需重复调用模型。"}</p>
                         <button className="button primary small" onClick={() => { setRepairJob(selectedTask); setCandidate(selectedTask.repair_candidate || ""); }}>修正规划结果<ArrowUpRight size={14} /></button>
                       </div>
                     )}
@@ -2373,6 +2505,17 @@ export default function App() {
               rows={5}
               required
             />
+            {editorialTask && <section className="context-card" aria-label="审稿与改写范围">
+              <div><GitCompareArrows size={13} /><span>本次处理范围</span></div>
+              <p>{editorSelection ? `仅选区 [${editorSelection.start_char}, ${editorSelection.end_char})` : `整章：已保存文稿全文${doc ? `，${Array.from(doc.content).length} 字符` : ""}`}</p>
+              {editorSelection && !editorSelectionValid && <p className="inline-error" role="alert">选区已失效。请保存或重新读取文稿，再指定选区；也可明确改为整章处理。</p>}
+              {editorSelection && editorSelectionValid && doc && <details><summary>核对所选原句 · {editorSelection.end_char - editorSelection.start_char} 字符</summary><pre style={{whiteSpace:"pre-wrap",overflowWrap:"anywhere",maxHeight:160,overflow:"auto"}}>{Array.from(doc.content).slice(editorSelection.start_char, editorSelection.end_char).join("")}</pre><small>已绑定文稿版本 {editorSelection.hash.slice(0, 12)}</small></details>}
+              <button type="button" className="button secondary small" disabled={!doc || dirty || !editorDocumentCurrent || preview || !!busy || taskUncertain} onClick={captureEditorSelection}>使用当前选区</button>
+              {editorSelection && <button type="button" className="text-button" disabled={!!busy || taskUncertain} onClick={() => { setEditorSelection(null); setTaskPreview(null); }}>改为整章处理</button>}
+              <small>在源码正文中选中文字，再点击“使用当前选区”。区间从 0 开始，起点包含、终点不包含；按 Unicode 字符计数。{preview ? "请先切换到源码选择文字。" : ""}</small>
+              <fieldset style={{border:0,padding:0,margin:"12px 0"}} disabled={!!busy || taskUncertain}><legend className="field-label">编辑目标（至少一项）</legend><div style={{display:"grid",gap:6}}>{editorialGoalOptions.map((option) => <label key={option.id} style={{display:"flex",alignItems:"center",gap:6,fontSize:12}}><input type="checkbox" checked={editorGoals.includes(option.id)} onChange={(event) => setEditorGoals((current) => event.target.checked ? [...current, option.id] : current.filter((goal) => goal !== option.id))} />{option.label}</label>)}</div></fieldset>
+              <label className="field-label" htmlFor="editor-intensity">编辑强度</label><div className="select-wrap"><select id="editor-intensity" value={editorIntensity} disabled={!!busy || taskUncertain} onChange={(event) => setEditorIntensity(event.target.value as typeof editorIntensity)}><option value="conservative">保守 · 尽量保留原句</option><option value="standard">标准 · 调整表达与节奏</option><option value="deep">深入 · 重构表达，保留事实</option></select><ChevronDown size={13} /></div>
+            </section>}
             {taskKind === "draft" && (
               <>
                 <label className="field-label" htmlFor="approved-plan">
@@ -2404,6 +2547,7 @@ export default function App() {
                 <p className="field-hint">起草时按所选模式重新整理最新材料；来源变化后会阻止发布旧结果。</p>
               </>
             )}
+            {project && <div className="context-card"><div><Library size={13} /><span>本次参考资料</span></div><p>已选 {materialIds(effectiveEditorMaterials, "entry_ids").length + materialIds(effectiveEditorMaterials, "binding_ids").length} 份卡片 / 固定资料，{retrievalMaterialCount(effectiveEditorMaterials)} 个检索片段</p><button type="button" className="button secondary small" disabled={!!busy || taskUncertain} onClick={() => setEditorMaterialsOpen(true)}><BookOpen size={14} />选择资料与参考书</button><small>从本书资料与参考书中选择；发送前核对精确内容与版本。</small></div>}
             <div className="context-card">
               <div>
                 <Layers3 size={13} />
@@ -2435,6 +2579,7 @@ export default function App() {
                 !selectedProvider?.available ||
                 !!busy ||
                 !instruction.trim() ||
+                (editorialTask && (!editorDocumentCurrent || !!editorSelection && !editorSelectionValid || !editorGoals.length)) ||
                 (taskKind === "draft" &&
                   !approvedPlans.some((item) => item.path === planPath))
               }
@@ -2696,6 +2841,7 @@ export default function App() {
               <div className="target-field">
                 <input
                   value={proposal.target}
+                  placeholder="例如 chapters/ch003.md，填写后核对目标"
                   onChange={(event) => {
                     setProposal({ ...proposal, target: event.target.value });
                     setVerifiedTarget("");
@@ -2705,19 +2851,20 @@ export default function App() {
                 <button
                   type="button"
                   className="button secondary small"
-                  disabled={!!busy || verifiedTarget === proposal.target}
+                  disabled={!!busy || !proposal.target.trim() || verifiedTarget === proposal.target}
                   onClick={() => void verifyProposalTarget()}
                 >
-                  {verifiedTarget === proposal.target ? (
+                  {proposal.target && verifiedTarget === proposal.target ? (
                     <Check size={14} />
                   ) : (
                     <RefreshCw size={14} />
                   )}
-                  {verifiedTarget === proposal.target ? "已核对" : "核对目标"}
+                  {proposal.target && verifiedTarget === proposal.target ? "已核对" : "核对目标"}
                 </button>
               </div>
               <small>
-                正式章节使用 chapters/ch001.md；设定使用 bible/ 或
+                {proposal.targetNote && <>{proposal.targetNote}<br /></>}
+                正式章节使用 chapters/chNNN.md（如第三章 ch003.md）；设定使用 bible/ 或
                 memory/。更换目标后须核对版本。
               </small>
             </label>
@@ -2779,6 +2926,7 @@ export default function App() {
                 className="button primary"
                 disabled={
                   !!busy ||
+                  !proposal.target.trim() ||
                   verifiedTarget !== proposal.target ||
                   !proposal.reason.trim() ||
                   !proposal.impact.trim()
@@ -2798,6 +2946,8 @@ export default function App() {
           onClose={() => setShowSources(false)}
           wide
         >
+          <p className="form-note">{importIntent === "planning" ? "可导入散文总纲、卷纲或情节要点，结构无需与 Studio 模板一致。原文保留，后续生成的是待审规划候选。" : importIntent === "manuscript" ? "导入已写正文后，先在已有小说修订中检查分章。导入本身不会生成定稿或让故事事件自动生效。" : "先选择原件编码，再选择文件。每次重新打开导入入口都会恢复自动识别。"}</p>
+          {latestImport && <div className="repair-card" role="status"><div><CircleCheck size={18} /><strong>已导入：{latestImport.original_name}</strong></div><p>原件与提取文本已保存。来源材料仍需你确认，尚未调用模型。</p>{importIntent !== "manuscript" && <button type="button" className="button primary small" disabled={!!busy} onClick={() => useImportedOutline(latestImport)}>用这份大纲继续规划<ArrowRight size={14} /></button>}{importIntent === "manuscript" && <button type="button" className="button primary small" disabled={!!busy} onClick={async () => { if (area !== "manuscript" && !await allowLeave()) return; setShowSources(false); setArea("manuscript"); }}>返回已有小说修订<ArrowRight size={14} /></button>}</div>}
           <div className="source-list">
             {imports.length ? (
               imports.map((item) => (
@@ -2805,7 +2955,7 @@ export default function App() {
                   key={item.import_id}
                   onClick={() =>
                     void openDocument(
-                      `imports/original/${item.import_id}/extracted.md`,
+                      importedSourcePath(item),
                     )
                   }
                 >
@@ -2837,7 +2987,7 @@ export default function App() {
               <select
                 aria-label="原件编码"
                 value={importEncoding}
-                onChange={(event) => setImportEncoding(event.target.value)}
+                onChange={(event) => setImportEncoding(event.target.value as ImportEncoding)}
               >
                 <option value="auto">UTF-8 / BOM 自动识别</option>
                 <option value="gb18030">GB18030 / GBK</option>
@@ -2850,7 +3000,7 @@ export default function App() {
               onClick={() => fileInput.current?.click()}
             >
               <Upload size={15} />
-              导入资料
+              选择文件并导入
             </button>
           </div>
         </Modal>
@@ -2865,8 +3015,10 @@ export default function App() {
           </form>
         </Modal>
       )}
-      {taskPreview && <Modal title="确认本次模型任务" subtitle="预览不会调用模型；确认后按固定文稿、模型与资料版本提交。" wide onClose={() => { if (!busy && (!taskUncertain || window.confirm("提交结果仍不明确。关闭后请先在任务记录核对，避免重复发起。"))) setTaskPreview(null); }}><JobRouteDetails route={taskPreview.route} /><TaskMaterialPreview route={taskPreview.route} />{taskUncertain && <p className="inline-error">请求结果尚不明确。先核对任务记录；此按钮沿用原幂等键核对并重试。</p>}<div className="modal-footer"><button className="button primary" disabled={!!busy || !libraryTaskConfiguration(taskPreview.route)} onClick={() => void confirmTask()}><Play size={14} />{taskUncertain ? "沿用原键核对并重试" : "确认并开始任务"}</button></div></Modal>}
-      {showSettings && <APISettings onClose={() => setShowSettings(false)} onModels={() => { if (navigate("models")) setShowSettings(false); }} onSaved={async () => { const boot = await api<Bootstrap>("/bootstrap"); setBootstrap(boot); setToken(boot.csrf_token); }} />}
+      {responseJob && <Modal title="原始模型响应 · 只读" subtitle="保留原始返回与计费记录；关闭或查看不会调用模型，也不会发布或定稿。" onClose={() => setResponseJob(null)} wide><div className="modal-form"><p>{responseJob.response_archived ? "模型已返回，但任务未成功发布。此为原始归档，不能作为当前有效结果、审批或定稿依据。" : responseJob.finish_reason === "length" ? "供应商报告已达到输出上限。" : "供应商未返回完整可用文本。"}{responseJob.response_repaired ? " 后续人工修复候选不改变这里的原始记录。" : ""}</p>{responseJob.response_candidate ? <label>已返回内容<textarea aria-label="原始模型响应（只读）" readOnly value={responseJob.response_candidate} rows={18} /></label> : <p className="analysis-warning">没有返回正文。已知 Token 用量仍记录在任务费用中，不能按未调用或零费用处理。</p>}<div className="modal-footer"><button className="button secondary" onClick={() => setResponseJob(null)}>关闭</button></div></div></Modal>}
+      {editorMaterialsOpen && project && <Modal title="选择本次任务资料与参考书" subtitle="只选择和本次任务有关的卡片、方法与原书片段；选择本身不调用模型。" wide onClose={() => setEditorMaterialsOpen(false)}><TaskMaterialPicker novelId={project.novel_id} purpose={taskMaterialPurpose(taskKind)} value={effectiveEditorMaterials} disabled={!!busy || taskUncertain} onChange={(selection) => { setEditorMaterialSelection(selection || {}); setTaskPreview(null); }} onOpenLibrary={openEditorMaterialLibrary} /><div className="modal-footer"><button type="button" className="button secondary" disabled={!!busy || taskUncertain} onClick={() => { setEditorMaterialSelection({}); setTaskPreview(null); }}>清空本次资料选择</button><button type="button" className="button primary" onClick={() => setEditorMaterialsOpen(false)}>完成选择，返回助手</button></div></Modal>}
+      {taskPreview && <Modal title="确认本次模型任务" subtitle="预览不会调用模型；确认后按固定文稿、模型与资料版本提交。" wide onClose={async () => { if (!busy && (!taskUncertain || await requestConfirmation("提交结果仍不明确。关闭后请先在任务记录核对，避免重复发起。"))) setTaskPreview(null); }}><EditorialTaskScopePreview request={taskPreview.body} quote={taskPreview.editorialScope?.selection ? taskPreview.editorialScope.quote : undefined} characters={taskPreview.editorialScope?.characters} /><JobRouteDetails route={taskPreview.route} /><TaskMaterialPreview route={taskPreview.route} onChangeMaterials={!taskUncertain ? () => { setTaskPreview(null); setEditorMaterialsOpen(true); } : undefined} />{taskUncertain && <p className="inline-error">请求结果尚不明确。先核对任务记录；此按钮沿用原幂等键核对并重试。</p>}<div className="modal-footer"><button className="button primary" disabled={!!busy || !libraryTaskConfiguration(taskPreview.route)} onClick={() => void confirmTask()}><Play size={14} />{taskUncertain ? "沿用原键核对并重试" : "确认并开始任务"}</button></div></Modal>}
+      {showSettings && <APISettings onClose={() => setShowSettings(false)} onModels={async () => { if (await navigate("models")) setShowSettings(false); }} onSaved={async () => { const boot = await api<Bootstrap>("/bootstrap"); setBootstrap(boot); setToken(boot.csrf_token); }} />}
       {showGuide && <UserGuide onClose={() => setShowGuide(false)} onNavigate={navigate} />}
       {exportRange && (
         <Modal
@@ -2924,6 +3076,7 @@ export default function App() {
           </form>
         </Modal>
       )}
+      <ConfirmationHost />
     </div>
     </TaskReferenceContext.Provider>
   );

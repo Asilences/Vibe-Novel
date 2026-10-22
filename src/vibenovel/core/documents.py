@@ -104,6 +104,38 @@ def _decode(raw: bytes) -> str:
         raise VibeNovelError("文档需要有效 UTF-8 编码") from exc
 
 
+def _chapter_summary(path, relative: str) -> dict:
+    """Describe saved chapter text without exposing its body in the file list.
+
+    Keep malformed/external oversized files visible with unknown counts. The
+    listing must not turn a byte length into a word count or grow an unbounded
+    editor buffer just to populate the chapter manager.
+    """
+    if not relative.startswith(("chapters/", "drafts/")) or path.suffix.lower() != ".md":
+        return {}
+    with path.open("rb") as stream:
+        raw = stream.read(MAX_DOCUMENT_BYTES + 1)
+    if len(raw) > MAX_DOCUMENT_BYTES:
+        return {"title": None, "character_count": None, "summary_status": "too_large"}
+    try:
+        content = raw.decode("utf-8")
+    except UnicodeError:
+        return {"title": None, "character_count": None, "summary_status": "invalid_utf8"}
+    title = None
+    for line in content.lstrip("\ufeff").splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        heading = re.fullmatch(r"#{1,6}\s+(.+?)(?:\s+#+)?", stripped)
+        if heading:
+            title = heading.group(1).strip()
+        elif re.match(r"第[零〇一二三四五六七八九十百千万两\d]+[章节回卷部](?:\s|[：:、.．]|$)", stripped):
+            title = stripped
+        break
+    return {"title": title, "character_count": sum(not char.isspace() for char in content),
+            "summary_status": "available"}
+
+
 def _check_expected(raw: Optional[bytes], expected_hash: Optional[str]) -> None:
     if expected_hash is not None and (not isinstance(expected_hash, str) or not HASH.fullmatch(expected_hash)):
         raise VibeNovelError("expected_hash 需要 SHA256，创建新文件时为 null")
@@ -310,7 +342,7 @@ class DocumentStore:
                     # a valid M0 import may be much larger than an editor buffer.
                     result.append({"path": relative, "hash": file_digest(path), "bytes": path.stat().st_size,
                                    "kind": kind, "readonly": kind != "editable", "revision": state["revision"],
-                                   "novel_id": self.project.novel_id})
+                                   "novel_id": self.project.novel_id, **_chapter_summary(path, relative)})
             return sorted(result, key=lambda item: item["path"])
 
     def save(self, path: str, content: str, expected_hash: Optional[str], provenance: str = "AUTHOR", *,

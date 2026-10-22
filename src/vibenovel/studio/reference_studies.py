@@ -18,6 +18,7 @@ from vibenovel.core.reference_studies import (ReferenceStudiesStore, MAX_RECORD,
     comparison_contract, identity, reading_contract, resolve_response_refs, response_json,
     source_id, text, validate_comparison, validate_reading)
 from vibenovel.errors import VibeNovelError
+from .providers import GenerationResult, generation_problem_message
 
 
 class _RunnerLock:
@@ -65,6 +66,7 @@ def study_prompt(kind, question, snapshots, previous=None, estimate=False):
     else:
         instructions += ("按给定先后阅读。本次只追加当前时点知情增量，不回填、改写早先知识。角色知情与读者知情分开，known/suspected/disproved明确区分。"
             "events按发生顺序输出，caused_by只能引用本节点较早事件或已给出的旧event key；characters沿用旧key。"
+            "knowledge.subject只能填写字面量reader，或本节点characters.key/先前known_character_keys中的人物键（如c1），不能填写人物姓名。"
             "线索resolved必须有不同铺设及揭示端点的精确证据；找不到就unresolved/uncertain（合法state为introduced/advanced/resolved/uncertain）。"
             "人物、情绪、节奏不适用时留空并解释，不能机械填满。carry_forward最多6000字符，是下段有界笔记而非完整记忆。"
             "历史精确知识增量均另行保留；只把本次收到的earlier_evidence当实读前文，不声称重新读过未发送部分。"
@@ -402,8 +404,12 @@ class ReferenceStudiesManager:
                                           {"prompt": prompt, "preview": quote, "attempt_key": node["attempt_key"]})
                     generated = self.gateway.generate(quote, prompt, cancel, node["attempt_key"])
                     raw = generated.text if hasattr(generated, "text") else generated["text"]
-                    response = {"text": raw, "usage": getattr(generated, "usage", None), "hash": digest(raw.encode("utf-8"))}
+                    response = {"text": raw, "usage": getattr(generated, "usage", None),
+                                "finish_reason": getattr(generated, "finish_reason", None), "hash": digest(raw.encode("utf-8"))}
                     self.store._write(self.store.path(study_id + "/responses/" + node["id"] + ".json"), response)
+                    problem = generation_problem_message(GenerationResult(raw, response["usage"], finish_reason=response["finish_reason"]))
+                    if problem:
+                        raise VibeNovelError(problem)
                     with self._lock:
                         study = self.store.load(study_id)
                         if cancel.is_set() or study["state"] == "cancelled":

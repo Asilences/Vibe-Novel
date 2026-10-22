@@ -1,3 +1,4 @@
+import { requestConfirmation } from "./confirm";
 import { useTaskReference } from "./TaskReferenceContext";
 import type { TaskReference } from "./TaskReferenceContext";
 import {
@@ -35,6 +36,7 @@ import type {
   Blueprint,
   DocumentItem,
   Job,
+  Imported,
   PlanningChapter,
   PlanningEvidence,
   PlanningPackage,
@@ -49,6 +51,7 @@ import { JobRouteDetails } from "./MultiModelWorkspace";
 import TaskMaterialPreview from "./TaskMaterialPreview";
 import TaskMaterialPicker from "./TaskMaterialPicker";
 import { referenceUsedBySelection, retireReferenceRetrieval, taskReferenceIdentity } from "./taskReferenceHelpers";
+import { planningSourceLabel } from "./importSourceHelpers";
 import "./planningFlow.css";
 
 export type PlanningFormDraft = {
@@ -63,6 +66,7 @@ export type PlanningFormDraft = {
 type Props = {
   project: Project;
   documents: DocumentItem[];
+  imports?: Imported[];
   providers: Provider[];
   onSettings: () => void;
   jobs: Job[];
@@ -73,6 +77,7 @@ type Props = {
   onSource: (path: string, line?: number) => void;
   initialPath?: string;
   initialSourcePath?: string;
+  sourceSelection?: { path: string; nonce: number } | null;
   initialDraft?: PlanningFormDraft;
   initialTab?: Tab;
   onDirtyChange?: (dirty: boolean) => void;
@@ -353,6 +358,7 @@ function RelationshipGraph({
 export default function PlanningWorkspace({
   project,
   documents,
+  imports = [],
   providers,
   onSettings,
   jobs,
@@ -363,6 +369,7 @@ export default function PlanningWorkspace({
   onSource,
   initialPath,
   initialSourcePath,
+  sourceSelection,
   initialDraft,
   initialTab,
   onDirtyChange,
@@ -460,6 +467,12 @@ export default function PlanningWorkspace({
   useEffect(() => { if (initialTab) setTab(initialTab); }, [initialTab]);
   useEffect(() => { if (!loading && !packages.length) setGeneratorOpen(true); }, [loading, packages.length, initialTab]);
   useEffect(() => { if (!initialDraft && initialSourcePath) setSourcePath(initialSourcePath); }, [initialSourcePath, initialDraft]);
+  useEffect(() => {
+    if (!sourceSelection) return;
+    setSourcePath(sourceSelection.path);
+    setTaskPreview(null);
+    setGeneratorOpen(true);
+  }, [sourceSelection]);
   const onDirtyRef = useRef(onDirtyChange); onDirtyRef.current = onDirtyChange;
   const formDirty = (!!editing && editText !== editing.content) || !!instruction.trim() || start !== 1 || count !== 3 || materialSelection !== null;
   useEffect(() => { onDirtyRef.current?.(formDirty); }, [formDirty]);
@@ -592,14 +605,14 @@ export default function PlanningWorkspace({
     } catch (failure) { if (alive.current) setError(message(failure)); }
     finally { if (alive.current) setBusy(""); }
   }
-  function closeEditing() {
+  async function closeEditing() {
     if (busy === "save-package") return;
     if (
       editing &&
       editText !== editing.content &&
-      !window.confirm(
+      !(await requestConfirmation(
         "候选 JSON 有未保存的修改。关闭会放弃这些修改，仍要继续吗？",
-      )
+      ))
     )
       return;
     setEditing(null);
@@ -706,7 +719,7 @@ export default function PlanningWorkspace({
                 <option value="">选择大纲或提取后的来源材料</option>
                 {sources.map((item) => (
                   <option key={item.path} value={item.path}>
-                    {item.path}
+                    {planningSourceLabel(item.path, imports)}
                   </option>
                 ))}
               </select>
@@ -746,6 +759,7 @@ export default function PlanningWorkspace({
           </div>
           <p className="planning-source-policy">
             主来源仅限导入提取文本、源大纲与大纲草案。已有正式正文与记忆只作有限上下文校验，已批准规划不作为新包输入。
+            外部大纲无需匹配模板，原件保留原有结构与章号；生成候选时，缺失资料、重复或跳号应列为待确认点。
           </p>
           <label className="planning-field instruction-field">
             作者要求<span>可留空，待确认之处交由作者决定</span>

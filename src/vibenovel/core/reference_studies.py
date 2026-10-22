@@ -561,7 +561,7 @@ def validate_study_origin(workspace, origin):
 
 def compile_graphs(records):
     graphs = {group: {"nodes": [], "edges": []} for group in GROUPS}
-    character_keys, event_keys, thread_keys = {}, {}, {}
+    character_keys, character_names, event_keys, thread_keys = {}, {}, {}, {}
     previous_rhythm = None
     for row in records:
         result, index, prefix = row["result"], row["read_index"], row["node_id"]
@@ -584,11 +584,15 @@ def compile_graphs(records):
             if item["key"] in character_keys:
                 edge("characters", character_keys[item["key"]], target, "后续状态", item["source_refs"])
             character_keys[item["key"]] = target
+            character_names[item["key"]] = item["name"]
         for item in result.get("relationships", []):
             if item["from"] in character_keys and item["to"] in character_keys:
                 edge("characters", character_keys[item["from"]], character_keys[item["to"]], item["change"], item["source_refs"])
         for number, item in enumerate(result.get("knowledge", [])):
-            target = node("characters", ("读者" if item["subject"] == "reader" else item["subject"]) + "：" + item["fact"], item["fact"], item["source_refs"], "knowledge:" + str(number), kind="knowledge", status=item["status"])
+            # Resolve names as this checkpoint is reached, never from a later
+            # declaration that would reveal an identity to an earlier reader.
+            subject_name = "读者" if item["subject"] == "reader" else character_names.get(item["subject"], item["subject"])
+            target = node("characters", subject_name + "：" + item["fact"], item["fact"], item["source_refs"], "knowledge:" + str(number), kind="knowledge", status=item["status"])
             if item["subject"] in character_keys:
                 edge("characters", character_keys[item["subject"]], target, item["status"], item["source_refs"])
         for item in result.get("threads", []):

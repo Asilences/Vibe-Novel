@@ -4,6 +4,7 @@ from __future__ import annotations
 import ipaddress
 import json
 import os
+import re
 import threading
 import urllib.error
 import urllib.parse
@@ -35,6 +36,33 @@ class GenerationResult:
     text: str
     usage: Optional[dict] = None
     model: Optional[str] = None
+    finish_reason: Optional[str] = None
+
+
+def generation_problem(result) -> Optional[str]:
+    """A returned/charged response is distinct from a complete candidate."""
+    reason = getattr(result, "finish_reason", None)
+    if reason == "length":
+        return "output_limit"
+    if reason not in (None, "stop"):
+        return "non_text_stop"
+    if not isinstance(getattr(result, "text", None), str) or not result.text.strip():
+        return "empty_text"
+    return None
+
+
+def generation_problem_message(result) -> Optional[str]:
+    problem = generation_problem(result)
+    if problem == "output_limit":
+        detail = ("模型达到输出上限，返回内容可能被截断。" if result.text.strip() else
+                  "模型达到输出上限但未返回正文；输出额度可能已用于思考。")
+    elif problem == "non_text_stop":
+        detail = "模型未以正常文本完成方式结束；不能认定返回内容完整。"
+    elif problem == "empty_text":
+        detail = "模型未返回可用正文；若启用了思考，输出额度可能已用于思考。"
+    else:
+        return None
+    return detail + "已保留响应与计费记录，不自动重试。请减少本次范围或提高模型输出上限，重新预览后明确启动新任务。"
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -107,7 +135,7 @@ class OpenAICompatibleProvider:
 
     def generate(self, prompt: str, cancel: threading.Event) -> GenerationResult:
         if cancel.is_set():
-            raise ProviderCancelled("任务已取消")
+            raise ProviderCancelled("任务已取消", billing="not_sent")
         payload = {
             "model": self._model,
             "messages": [
@@ -141,18 +169,34 @@ class OpenAICompatibleProvider:
                                 http_status=status) from None
         except (urllib.error.URLError, TimeoutError, OSError):
             raise ProviderError("API 连接失败或超时；未自动重试") from None
-        if cancel.is_set():
-            raise ProviderCancelled("任务已取消，已丢弃返回结果")
+        value, usage, finish_reason = None, None, None
         try:
             value = json.loads(raw.decode("utf-8"))
+            usage = _usage(value.get("usage")) if isinstance(value, dict) else None
             choices = value["choices"]
-            message = choices[0]["message"]
-            text = message["content"]
-            if not isinstance(text, str) or not text.strip():
+            choice = choices[0]
+            message = choice["message"]
+            if not isinstance(choice, dict) or not isinstance(message, dict):
+                raise ValueError("invalid message")
+            finish_reason = choice.get("finish_reason")
+            if finish_reason is not None and (not isinstance(finish_reason, str)
+                    or not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", finish_reason)
+                    or self._key in finish_reason):
+                # Do not turn malformed completion evidence into an absent,
+                # backwards-compatible stop reason, or expose arbitrary data.
+                finish_reason = "invalid"
+            text = message.get("content")
+            if text is None and (usage is not None or finish_reason is not None):
+                text = ""  # Reasoning/token exhaustion can return no text but known paid usage.
+            if not isinstance(text, str) or (not text.strip() and usage is None and finish_reason is None):
                 raise ValueError("missing text")
             text.encode("utf-8")
         except (ValueError, KeyError, IndexError, TypeError, UnicodeError, RecursionError):
-            raise ProviderError("API 返回无效或空的候选文本") from None
+            if usage is None:
+                raise ProviderError("API 返回无效或空的候选文本") from None
+            # The service can report a real token bill without a usable text
+            # message. Preserve that bill instead of treating it as unknown.
+            text = ""
         # The request's configured model is already retained in the frozen
         # route. Missing or malformed response metadata remains unknown rather
         # than being fabricated from that request ID.
@@ -166,7 +210,9 @@ class OpenAICompatibleProvider:
                 response_model.encode("utf-8")
             except UnicodeError:
                 response_model = None
-        return GenerationResult(text, _usage(value.get("usage")), response_model)
+        # Workers settle known usage before discarding a cancelled, empty, or
+        # truncated candidate. Raising here would erase paid response evidence.
+        return GenerationResult(text, usage, response_model, finish_reason)
 
 
 def capabilities(environment: Optional[Mapping[str, str]] = None, *, workspace: Optional[Path] = None) -> dict:

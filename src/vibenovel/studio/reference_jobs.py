@@ -20,9 +20,11 @@ from vibenovel.core.locking import ConflictError, project_lock
 from vibenovel.core.project import utc_now
 from vibenovel.core.reference_books import ReferenceBookStore
 from vibenovel.core.reference_methods import check_frozen_research_plan
+from vibenovel.core.research_gateway import structured_research_request_options
 from vibenovel.errors import VibeNovelError
 from .model_registry import ModelRegistry, resolve_snapshot
 from .providers import GenerationResult, OpenAICompatibleProvider, ProviderCancelled
+from .providers import generation_problem_message
 from .routing import BudgetLedger, ProjectRouting
 
 _ID = re.compile(r"[0-9a-f]{32}\Z")
@@ -192,21 +194,25 @@ class ReferenceBatchManager:
 
     def _save(self, batch):
         with project_lock(_ResearchLock(self.store), timeout=2):
-            path = self._path(batch["book_id"], batch["id"])
-            path.parent.mkdir(parents=True, exist_ok=True)
-            if path.exists():
-                current = read_json(path, max_bytes=_MAX_RECORD)
-                if current.get("_revision") != batch.get("_revision"):
-                    raise ConflictError("另一进程已推进研究工程，拒绝覆盖或重复发送")
-            elif batch.get("_revision") is not None:
-                raise ConflictError("研究工程持久记录已移除，拒绝继续")
-            batch["updated_at"] = utc_now()
-            batch["_revision"] = batch.get("_revision", 0) + 1
-            raw = json_bytes(batch)
-            if len(raw) > _MAX_RECORD:
-                batch["_revision"] -= 1
-                raise VibeNovelError("研究工程记录超过8MiB，未截断；请明确缩小研究范围")
-            atomic_write(path, raw, overwrite=path.exists())
+            self._save_locked(batch)
+
+    def _save_locked(self, batch):
+        """CAS publication while the caller owns the research-state lock."""
+        path = self._path(batch["book_id"], batch["id"])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists():
+            current = read_json(path, max_bytes=_MAX_RECORD)
+            if current.get("_revision") != batch.get("_revision"):
+                raise ConflictError("另一进程已推进研究工程，拒绝覆盖或重复发送")
+        elif batch.get("_revision") is not None:
+            raise ConflictError("研究工程持久记录已移除，拒绝继续")
+        batch["updated_at"] = utc_now()
+        batch["_revision"] = batch.get("_revision", 0) + 1
+        raw = json_bytes(batch)
+        if len(raw) > _MAX_RECORD:
+            batch["_revision"] -= 1
+            raise VibeNovelError("研究工程记录超过8MiB，未截断；请明确缩小研究范围")
+        atomic_write(path, raw, overwrite=path.exists())
 
     def _load(self, book_id, batch_id):
         value = read_json(self._path(book_id, batch_id), max_bytes=_MAX_RECORD)
@@ -258,6 +264,7 @@ class ReferenceBatchManager:
         route["candidates"] = route["candidates"][:1]
         route["max_attempts"] = 1
         candidate = route["candidates"][0]
+        route["request_options"] = structured_research_request_options(candidate["base_url"], candidate["model"])
         if candidate["price_input_usd"] is None or candidate["price_output_usd"] is None:
             raise VibeNovelError("整书美元预算要求先在模型设置填写输入和输出价格；不会估造未知价格")
         if maximum > candidate["max_output_tokens"]:
@@ -469,12 +476,113 @@ class ReferenceBatchManager:
         project = self.projects.get(batch["novel_id"])
         for item in ([node] if node is not None else batch["nodes"][:1]):
             route = item["route"]
+            self._request_options(route)
             policy = ProjectRouting(project, self.workspace).public()
             if policy["revision"] != route["policy_revision"] or policy["hash"] != route["policy_hash"]:
                 raise ConflictError("计费作品路由或预算策略已变化，请新建研究工程")
             if ModelRegistry(self.workspace).snapshot(route["candidates"][0]["id"]) != route["candidates"][0]:
                 raise ConflictError("冻结模型配置已变化，请重新预览")
         return project
+
+    def response(self, book_id, batch_id, node_id):
+        node = self.get_node(book_id, batch_id, node_id)
+        raw = node.get("pending_response")
+        if not isinstance(raw, str):
+            raise ConflictError("该节点没有保留的原始响应，不重新发送请求")
+        try:
+            _parse(raw)
+            complete_json = True
+        except VibeNovelError:
+            complete_json = False
+        return {"node_id": node_id, "text": raw, "hash": digest(raw.encode("utf-8")),
+                "finish_reason": node.get("finish_reason"),
+                "repairable": node.get("state") == "failed" and node.get("finish_reason") == "stop"
+                              and complete_json and not node.get("budget_summary", {}).get("uncertain", True),
+                "notice": "原始响应只读保留；仅完整停止、原JSON完整且费用已知的失败候选可离线修复，不重发API。"}
+
+    def repair_response(self, book_id, batch_id, node_id, expected_hash, raw, reason):
+        raw = _text(raw, 1024 * 1024, "修复候选JSON")
+        reason = _text(reason, 2000, "修复说明")
+        version_id = digest(json_bytes([book_id, batch_id, node_id, expected_hash, raw, reason]))[:32]
+        key = (book_id, batch_id)
+        with self._lock, project_lock(_ResearchLock(self.store), timeout=2):
+            if self._threads.get(key) is not None and self._threads[key].is_alive():
+                raise ConflictError("研究仍在执行，不能修复或发布候选")
+            batch = self._load(book_id, batch_id)
+            node = next((item for item in batch["nodes"] if item["id"] == node_id), None)
+            if node is None:
+                raise VibeNovelError("研究节点不存在")
+            original = node.get("pending_response")
+            if not isinstance(original, str) or digest(original.encode("utf-8")) != expected_hash:
+                raise ConflictError("保存的原响应指纹变化，未发布修复候选")
+            if node.get("state") == "succeeded" and node.get("response_repair", {}).get("version_id") == version_id:
+                self._validate(batch, node)
+                self._inputs(batch, node)
+                self.get_node(book_id, batch_id, node_id)
+                return self._public(batch)
+            if batch["state"] not in {"failed", "paused"} or node["state"] != "failed":
+                raise ConflictError("仅失败且保留完整响应的节点可离线修复")
+            if (node.get("finish_reason") != "stop" or node.get("budget_summary", {}).get("uncertain", True)
+                    or not batch.get("parent_reservations")
+                    or any(item.get("status") != "known" for item in batch["parent_reservations"].values())):
+                raise ConflictError("响应被截断、未完整停止或费用不明，不能离线补成成功研究")
+            _parse(original)  # A repaired JSON cannot conceal a truncated original.
+            self._validate(batch, node)
+            _, fragments = self._inputs(batch, node)
+            result = _output(raw, fragments)
+            repair = {"version_id": version_id, "original_hash": expected_hash,
+                      "reason": reason, "provenance": "REPAIRED_CANDIDATE"}
+            result.update(book_id=book_id, edition_id=batch["edition_id"], batch_id=batch_id, node_id=node_id,
+                          response_repair=repair,
+                          coverage={"chapter_ids": node["chapter_ids"],
+                                    "input_refs": [{k: v for k, v in ref.items() if k != "quote"} for ref in fragments],
+                                    "depends_on": node["depends_on"],
+                                    "claim": "仅覆盖本节点实际发送范围；离线修复不代表重新精读或作者采用。"})
+            relative = "%s/editions/%s/analyses/%s/%s.json" % (book_id, batch["edition_id"], batch_id, node_id)
+            path = self.store.path(relative)
+            result_raw = json_bytes(result)
+            if path.exists() and path.read_bytes() != result_raw:
+                raise ConflictError("候选路径已有其他内容，未覆盖")
+            # Keep this path short enough for supported Windows workspaces.
+            # The digest binds batch/node identity and the record retains the
+            # full ownership fields, without another nested batch directory.
+            archive = self.store.path("%s/editions/%s/response-repairs/%s.json" %
+                                      (book_id, batch["edition_id"], version_id))
+            archive_raw = json_bytes({"schema_version": 1, "book_id": book_id, "edition_id": batch["edition_id"],
+                                      "batch_id": batch_id, "node_id": node_id, **repair,
+                                      "original_finish_reason": node["finish_reason"], "text": raw})
+            if archive.exists() and archive.read_bytes() != archive_raw:
+                raise ConflictError("修复版本已有不同内容，未覆盖")
+            # Recheck source permissions and exact input before publishing. The
+            # immutable original, fee reservations and request identity stay put.
+            self._validate(batch, node)
+            self._inputs(batch, node)
+            archive.parent.mkdir(parents=True, exist_ok=True)
+            if not archive.exists():
+                atomic_write(archive, archive_raw)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if not path.exists():
+                atomic_write(path, result_raw)
+            node.update(state="succeeded", result_path=relative, result_hash=digest(result_raw),
+                        result_summary=result["summary"], response_repair=repair, error=None)
+            batch.update(state="paused" if any(item["state"] != "succeeded" for item in batch["nodes"]) else "succeeded",
+                         paused=True, error=None)
+            if batch["state"] == "succeeded":
+                batch["result_node_id"] = batch["nodes"][-1]["id"]
+            self._save_locked(batch)
+            return self._public(batch)
+
+    @staticmethod
+    def _request_options(route):
+        # Older prepared plans did not freeze protocol options. Keep their
+        # original default instead of silently disabling thinking on resume.
+        if "request_options" not in route:
+            return {}
+        candidate = route["candidates"][0]
+        expected = structured_research_request_options(candidate["base_url"], candidate["model"])
+        if route["request_options"] != expected:
+            raise ConflictError("研究接口参数与冻结预览不一致，请重新预览新批次")
+        return copy.deepcopy(expected)
 
     def control(self, book_id, batch_id, action):
         if action == "resume":
@@ -615,7 +723,8 @@ class ReferenceBatchManager:
                         provider = self.jobs._factory("api")
                     else:
                         settings = replace(resolve_snapshot(self.workspace, candidate), max_output_tokens=batch["request"]["max_output_tokens"])
-                        provider = OpenAICompatibleProvider(settings=settings, timeout=180)
+                        provider = OpenAICompatibleProvider(settings=settings, timeout=180,
+                                                           **self._request_options(route))
                     response = provider.generate(prompt, event)
                 except Exception as exc:
                     billing = "not_sent" if getattr(exc, "billing", None) == "not_sent" else "unknown"
@@ -647,7 +756,11 @@ class ReferenceBatchManager:
                     if not isinstance(response.text, str) or len(response.text.encode("utf-8")) > 1024 * 1024:
                         raise VibeNovelError("模型候选响应超过1MiB保留容量；未发布或自动重试")
                     node["pending_response"] = response.text
+                    node["finish_reason"] = response.finish_reason
                     self._save(batch)
+                    problem = generation_problem_message(response)
+                    if problem:
+                        raise VibeNovelError(problem)
                     self._validate(batch, node)
                     # Inputs and their versions are checked again before publication.
                     self._inputs(batch, node)

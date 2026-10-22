@@ -67,6 +67,18 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(repaired["state"],"paused");self.assertEqual(len(self.gateway.calls),1)
         self.gateway.bad=False;final=self.execute(repaired)
         self.assertEqual(final["state"],"succeeded",final["error"]);self.assertEqual(len(self.gateway.calls),4)
+    def test_length_response_preserves_sample_but_cannot_enter_blind_evaluation(self):
+        generate=self.gateway.generate
+        def truncated(*args):
+            result=generate(*args);result.finish_reason="length";return result
+        self.gateway.generate=truncated
+        final=self.execute(self.create())
+        self.assertEqual(final["state"],"failed")
+        self.assertEqual(final["samples"],[])
+        self.assertEqual(len(self.gateway.calls),1)
+        response=self.manager.response(final["id"],"generate-1")
+        self.assertEqual(response["finish_reason"],"length")
+        self.assertTrue(response["text"])
     def test_source_withdrawal_during_send_blocks_late_result(self):
         self.gateway.callback=lambda:setattr(self,"valid",False)
         result=self.execute(self.create());self.assertEqual(result["state"],"failed")

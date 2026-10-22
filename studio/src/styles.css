@@ -3474,9 +3474,10 @@ nav {
   }
   .brand {
     min-width: 0;
+    flex-shrink: 0;
   }
   .brand > span {
-    font-size: 15px;
+    display: none;
   }
   .brand-mark {
     height: 26px;
@@ -3486,7 +3487,9 @@ nav {
     gap: 7px;
   }
   .project-select {
-    margin-left: 7px;
+    flex: 1;
+    min-width: 0;
+    max-width: 180px;
     gap: 5px;
   }
   .project-select > svg:first-child {
@@ -3494,11 +3497,23 @@ nav {
   }
   .project-select select {
     font-size: 10px;
-    max-width: 105px;
-    min-width: 75px;
+    width: 100%;
+    max-width: 165px;
+    min-width: 0;
   }
   .project-select > svg {
     width: 10px;
+    flex-shrink: 0;
+  }
+  .topbar .top-spacer {
+    display: none;
+  }
+  .topbar .guide-button {
+    flex-shrink: 0;
+    padding: 7px;
+  }
+  .guide-button > span {
+    display: none;
   }
   .topbar > .icon-button {
     display: inline-flex;

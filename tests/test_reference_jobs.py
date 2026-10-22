@@ -105,6 +105,29 @@ class ReferenceBatchTests(unittest.TestCase):
         self.assertEqual(node["result"]["verification"], "exact_quotes_only")
         self.assertNotIn("result", finished["nodes"][0])
 
+    def test_length_response_is_retained_but_not_counted_as_completed_reading(self):
+        owner = self
+        class Provider:
+            def generate(self, prompt, cancel):
+                owner.calls.append(prompt)
+                return GenerationResult(json.dumps(owner.response(prompt), ensure_ascii=False),
+                                        {"prompt_tokens": 10, "completion_tokens": 20}, "offline-model", "length")
+        manager = self.manager()
+        manager.jobs._factory = lambda name: Provider()
+        batch = self.create(manager)
+        manager.control(self.book["book_id"], batch["id"], "start")
+        final = self.wait(manager, batch["id"])
+        self.assertEqual(final["state"], "failed")
+        self.assertEqual(final["coverage"]["completed_chapters"], 0)
+        self.assertEqual(len(self.calls), 1)
+        node = manager.get_node(self.book["book_id"], batch["id"], "chapter-00000")
+        self.assertEqual(node["finish_reason"], "length")
+        self.assertTrue(node["pending_response"])
+        self.assertFalse(node["budget_summary"]["uncertain"])
+        with self.assertRaises(ConflictError):
+            manager.control(self.book["book_id"], batch["id"], "start")
+        self.assertEqual(len(self.calls), 1)
+
     def test_idempotency_and_model_changes_bind_whole_preview(self):
         manager = self.manager()
         request = self.request()

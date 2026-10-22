@@ -26,6 +26,9 @@ export type DocumentItem = {
   hash: string;
   bytes: number;
   readonly?: boolean;
+  title?: string | null;
+  character_count?: number | null;
+  summary_status?: "available" | "too_large" | "invalid_utf8";
 };
 export type Document = DocumentItem & { content: string; revision?: number };
 export type Version = {
@@ -68,6 +71,11 @@ export type Job = {
   recovery_available?: boolean;
   recovery_candidate?: string;
   repair_candidate?: string;
+  finish_reason?: string | null;
+  response_problem?: "output_limit" | "non_text_stop" | "empty_text" | null;
+  response_candidate?: string;
+  response_repaired?: boolean;
+  response_archived?: boolean;
   result_hash?: string;
   result_version_id?: string;
   result_library?: { bundle_id: string; analysis?: LibraryEntry | null; methods?: LibraryEntry[]; entries: LibraryEntry[] };

@@ -1,3 +1,4 @@
+import { requestConfirmation } from "./confirm";
 import { useEffect, useRef, useState } from "react";
 import { BookOpen, Database, LoaderCircle, RefreshCw, Search } from "lucide-react";
 import { api, libraryUrl } from "./api";
@@ -32,7 +33,7 @@ export default function TaskMaterialPicker({ novelId, value, onChange, purpose =
     const key = kind === "entry" ? "entry_ids" : "binding_ids", ids = materialIds(value, key);
     patch({ [key]: checked ? [...new Set([...ids, id])] : ids.filter((current) => current !== id) });
   }
-  function closeRetrieval() { if (!retrievalDirty || window.confirm("检索片段尚未加入任务，确认关闭并放弃本次勾选？")) { setRetrievalOpen(false); setRetrievalDirty(false); } }
+  async function closeRetrieval() { if (!retrievalDirty || (await requestConfirmation("检索片段尚未加入任务，确认关闭并放弃本次勾选？"))) { setRetrievalOpen(false); setRetrievalDirty(false); } }
   return <section className="task-material-picker" aria-label="为本次任务选择资料与方法">
     <div className="tm-heading"><div><h3><BookOpen size={16} />为本次任务选择资料与方法</h3><p>可选本书资料卡、已固定用于本书的个人资料，以及参考书的精确检索片段。改选后请重新预览任务。</p></div><button type="button" className="button secondary small" disabled={disabled || loading} onClick={() => void reload()}><RefreshCw size={13} className={loading ? "spin" : ""} />刷新可选资料</button></div>
     {error && <p className="inline-error" role="alert">{error}</p>}

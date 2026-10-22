@@ -18,6 +18,17 @@ from .project import utc_now
 from vibenovel.errors import VibeNovelError
 
 
+def structured_research_request_options(base_url, model):
+    """Protocol options for bounded research JSON, frozen with each preview.
+
+    This applies only to the official Flash endpoint. Compatible endpoints and
+    other model families keep their own defaults; never infer their protocol.
+    """
+    return ({"thinking": "disabled"}
+            if urlsplit(base_url).hostname == "api.deepseek.com"
+            and model.startswith("deepseek-flash") else {})
+
+
 class ResearchGateway:
     def __init__(self, workspace, provider_factory=None):
         self.workspace = Path(workspace).resolve()
@@ -106,9 +117,8 @@ class ResearchGateway:
         # explicit research JSON, and bind this protocol option to the preview.
         from vibenovel.studio.model_registry import resolve_snapshot
         settings = None if self.provider_factory else resolve_snapshot(self.workspace, snapshot)
-        options = ({"thinking": "disabled"} if settings is not None
-                   and urlsplit(settings.base_url).hostname == "api.deepseek.com"
-                   and snapshot["model"].startswith("deepseek-flash") else {})
+        options = (structured_research_request_options(settings.base_url, snapshot["model"])
+                   if settings is not None else {})
         tokens = len(prompt.encode("utf-8")) + 2048
         if max_output_tokens > snapshot["max_output_tokens"] or tokens + max_output_tokens > snapshot["context_tokens"]:
             raise VibeNovelError("研究输入或输出超过冻结模型容量，未发送")
@@ -143,7 +153,7 @@ class ResearchGateway:
                     if digest(path.read_bytes()) != old["response_hash"]:
                         raise ConflictError("已付费研究响应被修改，未重新请求")
                     saved = read_json(path, max_bytes=4 * 1024 * 1024)
-                    return GenerationResult(saved["text"], saved.get("usage"), saved.get("model"))
+                    return GenerationResult(saved["text"], saved.get("usage"), saved.get("model"), saved.get("finish_reason"))
                 raise ConflictError("该研究请求已有发送/费用记录，不自动重放；请核对已有结果")
             config = account["config"]
             if self._config_hash(config) != exact["config_hash"]:
@@ -178,13 +188,15 @@ class ResearchGateway:
                 current["error"] = "请求未完成，保留费用，不自动重发"
                 self._save(account)
             raise VibeNovelError("研究接口未完成，保留费用与请求状态，不自动重发") from None
-        raw = json_bytes({"text": response.text, "usage": response.usage, "model": response.model})
+        raw = json_bytes({"text": response.text, "usage": response.usage, "model": response.model,
+                          "finish_reason": response.finish_reason})
         with project_lock(self, timeout=2):
             path = self.path("responses/" + identity + ".json")
             atomic_write(path, raw, overwrite=False)
             account = self._load()
             current = account["attempts"][identity]
-            current.update(state="succeeded", response_hash=digest(raw), completed_at=utc_now(), usage=response.usage)
+            current.update(state="succeeded", response_hash=digest(raw), completed_at=utc_now(), usage=response.usage,
+                           finish_reason=response.finish_reason)
             usage = response.usage or {}
             if all(type(usage.get(key)) is int and usage[key] >= 0 for key in ("prompt_tokens", "completion_tokens")):
                 reported = (usage["prompt_tokens"] * exact["price_input_usd"] + usage["completion_tokens"] * exact["price_output_usd"]) / 1_000_000

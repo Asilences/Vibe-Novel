@@ -149,6 +149,30 @@ class PlanningTaskTests(unittest.TestCase):
         self.assertEqual(fixed["usage"], {"total_tokens": 37})
         self.assertEqual(provider.calls, 1)
 
+    def test_length_even_with_valid_json_requires_explicit_repair_and_preserves_original(self):
+        manager, provider = self.manager()
+        original = json.dumps(blueprint_fixture(), ensure_ascii=False)
+        calls = []
+        def incomplete(prompt, cancel):
+            calls.append(prompt)
+            return GenerationResult(original, {"prompt_tokens": 10, "completion_tokens": 20}, "test", "length")
+        provider.generate = incomplete
+        job = manager.submit(self.project, self.request(planning_count=1))
+        partial = self.wait(manager, job)
+        self.assertEqual(partial["state"], "awaiting_input")
+        self.assertEqual(partial["repair_candidate"], original)
+        self.assertEqual(partial["response_candidate"], original)
+        self.assertIsNone(partial["result_path"])
+        self.assertEqual(partial["attempts"][0]["billing"], "reported")
+        self.assertFalse(partial["recovery_available"])
+        fixed = manager.repair_result(self.project, job["id"], original)
+        self.assertEqual(fixed["state"], "succeeded")
+        self.assertTrue(fixed["response_repaired"])
+        self.assertEqual(fixed["response_candidate"], original)
+        self.assertEqual(fixed["finish_reason"], "length")
+        self.assertEqual(fixed["usage"], partial["usage"])
+        self.assertEqual(len(calls), 1)
+
     def test_semantic_errors_forged_evidence_and_chapter_range_are_not_published(self):
         variants = []
         missing = blueprint_fixture()
