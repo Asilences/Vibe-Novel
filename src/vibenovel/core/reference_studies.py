@@ -332,7 +332,112 @@ class ReferenceStudiesStore:
                 or [node.get("id") for node in study["nodes"]] != [node.get("id") for node in study["plan"]["nodes"]]
                 or len({node["id"] for node in study["nodes"]}) != len(study["nodes"])):
             raise ConflictError("研究进度节点与冻结计划不匹配")
+        previous = None
+        for extension in study.get("plan_extensions", []):
+            identity(extension["id"])
+            archive = read_json(self.path(study_id + "/plan-extensions/" + extension["id"] + ".json"), max_bytes=MAX_RECORD)
+            if (digest(json_bytes(archive)) != extension["archive_hash"]
+                    or archive["base_manifest"]["plan_hash"] != extension["old_plan_hash"]
+                    or digest(json_bytes(archive["base_manifest"]["plan"])) != extension["old_plan_hash"]
+                    or digest(json_bytes(archive["plan"])) != extension["new_plan_hash"]
+                    or previous is not None and previous != extension["old_plan_hash"]
+                    or archive["plan"]["nodes"][:len(archive["base_manifest"]["plan"]["nodes"])] != archive["base_manifest"]["plan"]["nodes"]):
+                raise ConflictError("阅读范围追加档案或原冻结前缀被修改")
+            previous = extension["new_plan_hash"]
+        if previous is not None and previous != study["plan_hash"]:
+            raise ConflictError("当前研究计划不在追加版本链中")
         return study
+
+    @staticmethod
+    def extension_id(key):
+        text(key, 80, "追加请求键")
+        if not re.fullmatch(r"[A-Za-z0-9_-]{16,80}", key):
+            raise VibeNovelError("追加请求需要16至80位固定幂等键")
+        return digest(key.encode("utf-8"))[:32]
+
+    def extension_result(self, study_id, key, expected_preview, budget_max_usd):
+        study = self.load(study_id)
+        extension_id = self.extension_id(key)
+        entry = next((entry for entry in study.get("plan_extensions", []) if entry["id"] == extension_id), None)
+        if entry is None:
+            return None
+        if entry["preview_hash"] != expected_preview:
+            raise ConflictError("追加请求键已绑定另一份预览，未重复追加")
+        archive = read_json(self.path(study_id + "/plan-extensions/" + extension_id + ".json"), max_bytes=MAX_RECORD)
+        if archive["plan"]["request"]["budget_max_usd"] != budget_max_usd:
+            raise ConflictError("追加请求键已绑定另一项预算，未修改已保存结果")
+        return study
+
+    def append_plan(self, study, plan, inputs, expected_preview, key):
+        """Publish an immutable extension archive before a single manifest pointer update.
+
+        Orphan new inputs/archive from an interrupted commit are reusable only if
+        byte-equivalent; existing paid requests, results and inputs are untouched.
+        The caller holds the study runner lease so a paid send cannot race this.
+        """
+        with self.locked():
+            old = self.load(study["id"])
+            saved = self.extension_result(study["id"], key, expected_preview, plan["request"]["budget_max_usd"])
+            if saved is not None:
+                return saved
+            if old != study:
+                raise ConflictError("阅读状态已变化，请重新预览追加范围")
+            count = len(old["nodes"])
+            if (old["state"] not in ("succeeded", "paused")
+                    or any(node["state"] not in ("pending", "succeeded") for node in old["nodes"])
+                    or old["plan"]["request"]["kind"] != "reading"
+                    or len(plan["nodes"]) <= count or plan["nodes"][:count] != old["plan"]["nodes"]
+                    or len(plan["nodes"]) != len(inputs)
+                    or any(plan["request"][field] != old["plan"]["request"][field]
+                           for field in ("kind", "question", "max_output_tokens", "segment_characters"))
+                    or len(plan["request"]["sources"]) != 1
+                    or any(plan["request"]["sources"][0][field] != old["plan"]["request"]["sources"][0][field]
+                           for field in ("book_id", "edition_id"))
+                    or plan["model_identity"] != old["plan"]["model_identity"]
+                    or plan["template_hash"] != old["plan"]["template_hash"]):
+                raise ConflictError("仅可向无未知收费的同一连续研究追加严格相同前缀后的范围")
+            new_snapshots = []
+            for index, snapshots in enumerate(inputs[count:], count):
+                if [part["hash"] for part in snapshots] != plan["nodes"][index]["snapshot_hashes"]:
+                    raise ConflictError("追加原文与新冻结计划不匹配")
+                new_snapshots.extend(snapshots)
+            source = plan["request"]["sources"][0]
+            if any(part["book_id"] != source["book_id"] or part["edition_id"] != source["edition_id"] for part in new_snapshots):
+                raise ConflictError("追加来源必须保持同书同版")
+            verified = self.books.snapshots_ranges(source["book_id"], source["edition_id"],
+                [[{name: ref[name] for name in ("chapter_id", "start_char", "end_char")} for ref in part["refs"]]
+                 for part in new_snapshots])
+            if [part["hash"] for part in verified] != [part["hash"] for part in new_snapshots]:
+                raise ConflictError("追加原文版本或授权已变化")
+            extension_id = self.extension_id(key)
+            archive_path = self.path(study["id"] + "/plan-extensions/" + extension_id + ".json")
+            archive = {"schema_version": 1, "id": extension_id, "study_id": study["id"],
+                       "base_manifest": copy.deepcopy(old), "plan": copy.deepcopy(plan),
+                       "preview_hash": expected_preview, "created_at": utc_now()}
+            if archive_path.exists():
+                prior = read_json(archive_path, max_bytes=MAX_RECORD)
+                archive["created_at"] = prior["created_at"]
+                if prior != archive:
+                    raise ConflictError("追加请求已有不同的未发布档案；请核对，未覆盖旧文件")
+            updated = copy.deepcopy(old)
+            updated["plan"], updated["plan_hash"] = copy.deepcopy(plan), digest(json_bytes(plan))
+            updated["nodes"].extend({"id": node["id"], "state": "pending"} for node in plan["nodes"][count:])
+            updated.setdefault("plan_extensions", []).append({"id": extension_id, "archive_hash": digest(json_bytes(archive)),
+                "old_plan_hash": old["plan_hash"], "new_plan_hash": updated["plan_hash"], "preview_hash": expected_preview,
+                "added_nodes": len(inputs)-count})
+            updated.update(state="paused", error=None, revision=old["revision"]+1, updated_at=utc_now())
+            values = [(self.path(study["id"] + "/inputs/" + plan["nodes"][index]["id"] + ".json"), {"snapshots": snapshots})
+                      for index, snapshots in enumerate(inputs[count:], count)]
+            if any(len(json_bytes(value)) > MAX_RECORD for _, value in values + [(archive_path, archive), (self.path(study["id"] + "/manifest.json"), updated)]):
+                raise VibeNovelError("追加研究或审计档案超过8MiB；未修改当前研究")
+            for path, value in values + [(archive_path, archive)]:
+                if path.exists():
+                    if path.read_bytes() != json_bytes(value):
+                        raise ConflictError("追加路径已有不同内容；未覆盖历史输入")
+                else:
+                    self._write(path, value)
+            self._write(self.path(study["id"] + "/manifest.json"), updated, overwrite=True)
+            return self.load(study["id"])
 
     def save(self, study):
         with self.locked():
@@ -382,13 +487,14 @@ class ReferenceStudiesStore:
             self._write(self.path(study_id + "/manifest.json"), study)
             return study
 
-    def node_input(self, study, index):
+    def node_input(self, study, index, *, validate=True):
         node = study["plan"]["nodes"][index]
         value = read_json(self.path(study["id"] + "/inputs/" + node["id"] + ".json"), max_bytes=MAX_RECORD)
         if [item["hash"] for item in value["snapshots"]] != node["snapshot_hashes"]:
             raise ConflictError("研究原文快照与冻结计划不匹配")
-        for snapshot in value["snapshots"]:
-            self.books.validate_snapshot(snapshot)
+        if validate:
+            for snapshot in value["snapshots"]:
+                self.books.validate_snapshot(snapshot)
         return value["snapshots"]
 
     def node_result(self, study, index):
@@ -431,10 +537,17 @@ class ReferenceStudiesStore:
     def export_verified(self, study_id):
         study = self.load(study_id)
         records, allowed, characters, events, previous = [], [], set(), set(), None
+        prefix_inputs = []
+        for index, node in enumerate(study["nodes"]):
+            if node["state"] != "succeeded":
+                break
+            prefix_inputs.append(self.node_input(study, index, validate=False))
+        if prefix_inputs:
+            self.books.validate_snapshots([part for batch in prefix_inputs for part in batch])
         for index, node in enumerate(study["nodes"]):
             if node["state"] != "succeeded":
                 break  # No look-ahead through a gap in the reading chain.
-            snapshots = self.node_input(study, index)
+            snapshots = prefix_inputs[index]
             current = [ref for snapshot in snapshots for ref in snapshot["refs"]]
             wrapper = self.node_result(study, index)
             if wrapper.get("prior_checkpoint_hash") != previous:

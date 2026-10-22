@@ -177,6 +177,158 @@ class StudyTests(unittest.TestCase):
         self.assertEqual(self.gateway.calls, [])
         self.assertEqual(self.manager.store.load(study["id"])["plan_hash"], frozen)
 
+    def test_extension_preserves_paid_prefix_and_resumes_with_previous_checkpoint(self):
+        request = self.request()
+        request["sources"][0]["chapter_ids"] = [self.book["chapters"][0]["chapter_id"]]
+        study = self.run_study(self.create(request))
+        root = self.manager.store.path(study["id"])
+        before = {path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()}
+        original = self.manager.store.load(study["id"])
+        preview = self.manager.preview_extension(study["id"], 2)
+        self.assertEqual(preview["old_nodes"], 1)
+        self.assertEqual(preview["added_nodes"], 1)
+        self.assertEqual(len(self.gateway.calls), 1)
+        self.assertEqual({path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()}, before)
+        appended = self.manager.extend(study["id"], 2, preview["hash"], "append-synthetic-001")
+        self.assertEqual(appended["state"], "paused")
+        current = self.manager.store.load(study["id"])
+        self.assertEqual(current["plan"]["nodes"][:1], original["plan"]["nodes"])
+        self.assertEqual(current["nodes"][:1], original["nodes"])
+        archive = read_json(root / "plan-extensions" / (current["plan_extensions"][0]["id"] + ".json"))
+        self.assertEqual(archive["base_manifest"], original)
+        for relative, raw in before.items():
+            if str(relative) != "manifest.json":
+                self.assertEqual((root / relative).read_bytes(), raw)
+        files = {path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()}
+        self.manager.extend(study["id"], 2, preview["hash"], "append-synthetic-001")
+        self.assertEqual({path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()}, files)
+        final = self.run_study(appended)
+        self.assertEqual(final["state"], "succeeded", final.get("error"))
+        self.assertEqual(len(self.gateway.calls), 2)
+        self.assertIn('"e1"', self.gateway.calls[1][0].split("</prior_candidate_state>", 1)[0])
+        records = self.manager.store.export_verified(study["id"])["results"]
+        self.assertEqual(records[0]["result_hash"], original["nodes"][0]["result_hash"])
+        with self.assertRaises(ConflictError):
+            self.manager.extend(study["id"], 2, "f" * 64, "append-synthetic-001")
+
+    def test_extension_rejects_stale_preview_failed_nodes_and_changed_template(self):
+        request = self.request()
+        request["sources"][0]["chapter_ids"] = [self.book["chapters"][0]["chapter_id"]]
+        study = self.run_study(self.create(request))
+        preview = self.manager.preview_extension(study["id"], 2)
+        with self.assertRaises(ConflictError):
+            self.manager.extend(study["id"], 3, preview["hash"], "append-synthetic-stale")
+        with patch("vibenovel.studio.reference_studies.template_hash", return_value="changed-template"):
+            with self.assertRaises(ConflictError):
+                self.manager.preview_extension(study["id"], 2)
+        current = self.manager.store.load(study["id"])
+        current.update(state="paused")
+        current["nodes"][0]["state"] = "interrupted"
+        self.manager.store.save(current)
+        with self.assertRaises(ConflictError):
+            self.manager.preview_extension(study["id"], 2)
+        self.assertEqual(len(self.gateway.calls), 1)
+
+    def test_extension_rejects_missing_earlier_body_and_tampered_archive(self):
+        book = self.books.import_book("顺序.txt", "第一章 河岸\n甲走向河岸。\n第二章 木桥\n甲渡过木桥。\n第三章 山路\n甲踏上山路。".encode(), title="顺序书")
+        self.books.update_policy(book["book_id"], expected_hash=book["hash"], outbound="excerpts")
+        request = self.request()
+        request["sources"] = [{"book_id":book["book_id"],"edition_id":book["edition_id"],"chapter_ids":[book["chapters"][1]["chapter_id"]]}]
+        study = self.run_study(self.create(request))
+        with self.assertRaisesRegex(ConflictError, "完整章段"):
+            self.manager.preview_extension(study["id"], 2)
+        request["sources"][0]["chapter_ids"] = [book["chapters"][0]["chapter_id"]]
+        self.gateway.calls.clear()
+        study = self.run_study(self.create(request, key="different-prefix-study"))
+        preview = self.manager.preview_extension(study["id"], 2)
+        self.manager.extend(study["id"], 2, preview["hash"], "append-to-tamper-001")
+        current = self.manager.store.load(study["id"])
+        archive = self.manager.store.path(study["id"] + "/plan-extensions/" + current["plan_extensions"][0]["id"] + ".json")
+        value = read_json(archive)
+        value["base_manifest"]["plan"]["nodes"][0]["characters"] += 1
+        archive.write_bytes(json_bytes(value))
+        with self.assertRaises(ConflictError):
+            self.manager.store.load(study["id"])
+
+    def test_extension_keeps_paused_pending_prefix_without_resending_paid_nodes(self):
+        book = self.books.import_book("暂停.txt", "第一章 河岸\n甲走向河岸。\n第二章 木桥\n甲渡过木桥。\n第三章 山路\n甲踏上山路。".encode(), title="暂停书")
+        self.books.update_policy(book["book_id"], expected_hash=book["hash"], outbound="excerpts")
+        request = self.request()
+        request["sources"] = [{"book_id": book["book_id"], "edition_id": book["edition_id"],
+                               "chapter_ids": [chapter["chapter_id"] for chapter in book["chapters"][:2]]}]
+        entered, release = threading.Event(), threading.Event()
+        def block_once():
+            if len(self.gateway.calls) == 1:
+                entered.set(); release.wait(timeout=10)
+        self.gateway.callback = block_once
+        study = self.create(request)
+        self.manager.control(study["id"], "start")
+        self.assertTrue(entered.wait(timeout=5))
+        self.manager.control(study["id"], "pause")
+        release.set(); self.manager._threads[study["id"]].join(timeout=10)
+        old = self.manager.store.load(study["id"])
+        self.assertEqual([node["state"] for node in old["nodes"]], ["succeeded", "pending"])
+        preview = self.manager.preview_extension(study["id"], 2)
+        appended = self.manager.extend(study["id"], 2, preview["hash"], "append-paused-prefix-01")
+        self.assertEqual(self.manager.store.load(study["id"])["nodes"][:2], old["nodes"])
+        self.assertEqual(len(self.gateway.calls), 1)
+        final = self.run_study(appended)
+        self.assertEqual(final["state"], "succeeded", final.get("error"))
+        self.assertEqual(len(self.gateway.calls), 3)
+        self.assertEqual(len({key for _, key in self.gateway.calls}), 3)
+        self.assertEqual(self.manager.store.node_result(self.manager.store.load(study["id"]), 0)["result"]["knowledge"][0]["fact"], "读到第1段")
+
+    def test_extension_1091_nodes_keeps_twenty_node_prefix_within_durable_record_limit(self):
+        raw = "\n".join("第%d章 路段%d\n甲继续走过第%d段山路。" % (index, index, index) for index in range(1, 1092))
+        book = self.books.import_book("长书.txt", raw.encode(), title="人工长书")
+        self.books.update_policy(book["book_id"], expected_hash=book["hash"], outbound="excerpts")
+        request = self.request()
+        request["sources"] = [{"book_id": book["book_id"], "edition_id": book["edition_id"],
+                               "chapter_ids": [chapter["chapter_id"] for chapter in book["chapters"][:20]]}]
+        # A prepared twenty-node range can be paused without sending anything;
+        # appending must leave every original frozen input byte-identical.
+        study = self.create(request)
+        paused = self.manager.control(study["id"], "pause")
+        old = self.manager.store.load(study["id"])
+        inputs = {node["id"]: self.manager.store.path(study["id"] + "/inputs/" + node["id"] + ".json").read_bytes()
+                  for node in old["nodes"]}
+        preview = self.manager.preview_extension(paused["id"], 100)
+        self.assertEqual((preview["old_nodes"], preview["added_nodes"]), (20, 1071))
+        appended = self.manager.extend(study["id"], 100, preview["hash"], "append-long-book-1091")
+        self.assertEqual((appended["total_nodes"], appended["completed_nodes"]), (1091, 0))
+        self.assertEqual(self.manager.store.load(study["id"])["plan"]["nodes"][:20], old["plan"]["nodes"])
+        for node_id, value in inputs.items():
+            self.assertEqual(self.manager.store.path(study["id"] + "/inputs/" + node_id + ".json").read_bytes(), value)
+        self.assertEqual(self.gateway.calls, [])
+
+    def test_extension_rejects_model_or_authorization_drift_before_any_new_send(self):
+        request = self.request()
+        request["sources"][0]["chapter_ids"] = [self.book["chapters"][0]["chapter_id"]]
+        study = self.run_study(self.create(request))
+        preview = self.manager.preview_extension(study["id"], 2)
+        original_preview = self.gateway.preview
+        self.gateway.preview = lambda *args: {**original_preview(*args), "model_identity": "another-model"}
+        with self.assertRaisesRegex(ConflictError, "追加模型"):
+            self.manager.extend(study["id"], 2, preview["hash"], "append-changed-model1")
+        self.gateway.preview = original_preview
+        current = self.books.detail(self.book["book_id"])
+        self.books.update_policy(current["book_id"], expected_hash=current["hash"], outbound="local", withdrawn=True)
+        with self.assertRaises(ConflictError):
+            self.manager.extend(study["id"], 2, preview["hash"], "append-withdrawn-book")
+        self.assertEqual(len(self.gateway.calls), 1)
+
+    def test_extension_store_rejects_attempt_to_append_another_book(self):
+        request = self.request()
+        request["sources"][0]["chapter_ids"] = [self.book["chapters"][0]["chapter_id"]]
+        study = self.run_study(self.create(request))
+        value, original, inputs = self.manager._extension_plan(study["id"], 2)
+        plan = copy.deepcopy(value["plan"])
+        plan["request"]["sources"][0]["book_id"] = "f" * 32
+        with self.assertRaises(ConflictError):
+            self.manager.store.append_plan(original, plan, inputs, value["hash"], "append-forged-source1")
+        self.assertEqual(self.manager.store.load(study["id"])["plan_hash"], original["plan_hash"])
+        self.assertEqual(len(self.gateway.calls), 1)
+
     def test_length_response_does_not_publish_a_complete_checkpoint(self):
         generate = self.gateway.generate
         def truncated(*args):

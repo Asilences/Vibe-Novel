@@ -988,6 +988,20 @@ class LibraryStore:
                                          "method_indices": method_indices}))
         return self._publish_research_preview(preview, idempotency_key, request_hash)
 
+    def preview_synthesis_methods(self, synthesis_id, method_indices):
+        if self.project is not None:
+            raise VibeNovelError("归并方法先保存个人候选库，再由作者选入本书")
+        from .reference_synthesis import ReferenceSynthesisManager
+        return ReferenceSynthesisManager(self.workspace).preview_methods(synthesis_id, method_indices)
+
+    def publish_synthesis_methods(self, synthesis_id, method_indices, expected_preview, idempotency_key):
+        preview = self.preview_synthesis_methods(synthesis_id, method_indices)
+        if preview["hash"] != expected_preview:
+            raise ConflictError("归并方法、精读结果或来源已变化，请重新预览")
+        request_hash = digest(json_bytes({"synthesis_id": synthesis_id, "preview_hash": expected_preview,
+                                         "method_indices": method_indices}))
+        return self._publish_research_preview(preview, idempotency_key, request_hash)
+
     def _publish_research_preview(self, preview, idempotency_key, request_hash):
         if not isinstance(idempotency_key, str) or not re.fullmatch(r"[A-Za-z0-9_-]{16,80}", idempotency_key):
             raise VibeNovelError("研究方法发布需要16至80位固定幂等键")
@@ -1006,7 +1020,7 @@ class LibraryStore:
                                            "method": {"purpose": preview["purpose"], "steps": method["steps"],
                                                       "limitations": method["limitations"]}}, state, "AI_SUGGESTED")
                 origin = copy.deepcopy(preview["origin"])
-                if origin.get("source_type") != "reference_study":
+                if origin.get("source_type") not in ("reference_study", "reference_synthesis"):
                     origin["method_indices"] = [method["index"]]
                     origin["evidence"] = copy.deepcopy(method["source_refs"])
                 data.update(research_origin=origin, authorization_revision=uuid4().hex)

@@ -188,7 +188,7 @@ class ReferenceRetrievalStore:
             origin = entry.get("research_origin")
             if origin:
                 origin_books = ({item.get("book_id") for item in origin.get("books", [])}
-                                if origin.get("source_type") == "reference_study" else {origin.get("book_id")})
+                                if origin.get("source_type") in ("reference_study", "reference_synthesis") else {origin.get("book_id")})
                 if not origin_books or not origin_books <= set(book_ids):
                     continue
             try:
@@ -235,6 +235,18 @@ class ReferenceRetrievalStore:
                                "book_ids": sorted(ids),
                                "completed_segments": coverage.get("completed_segments", len(exported["results"])),
                                "total_segments": coverage.get("total_segments", len(exported["results"]))})
+        from .reference_synthesis import ReferenceSynthesisManager
+        syntheses = ReferenceSynthesisManager(self.workspace)
+        for item in syntheses.list():
+            if item.get("completed_nodes", 0) <= 0 or not set(item["book_ids"]) <= set(book_ids):
+                continue
+            try:
+                exported = syntheses.export_verified(item["id"])
+            except VibeNovelError:
+                continue
+            result.append({"id": item["id"], "hash": exported["hash"], "state": exported["state"],
+                           "source_type": "reference_synthesis", "kind": "synthesis", "question": "已读范围的阶段与最终归并",
+                           "book_ids": item["book_ids"], "completed_segments": item["completed_nodes"], "total_segments": item["total_nodes"]})
         if len(result) > 100:
             raise VibeNovelError("有效研究超过单索引100项上限，请先归档研究范围；未静默截断")
         return sorted(result, key=lambda item: item["id"])
@@ -356,8 +368,12 @@ class ReferenceRetrievalStore:
         if "method" in manifest["layers"] and self._methods(manifest["book_ids"]) != manifest["methods"]:
             raise ConflictError("已采用方法的版本或采用状态已变化，请重建索引")
         for study in manifest["studies"]:
-            from .reference_studies import ReferenceStudiesStore
-            exported = ReferenceStudiesStore(self.workspace).export_verified(study["id"])
+            if study.get("source_type") == "reference_synthesis":
+                from .reference_synthesis import ReferenceSynthesisManager
+                exported = ReferenceSynthesisManager(self.workspace).export_verified(study["id"])
+            else:
+                from .reference_studies import ReferenceStudiesStore
+                exported = ReferenceStudiesStore(self.workspace).export_verified(study["id"])
             if exported["hash"] != study["hash"]:
                 raise ConflictError("连续阅读或图谱研究已变化，请重建索引")
 
@@ -461,6 +477,24 @@ class ReferenceRetrievalStore:
             return
         from .reference_studies import ReferenceStudiesStore
         for study in manifest["studies"]:
+            if study.get("source_type") == "reference_synthesis":
+                from .reference_synthesis import ReferenceSynthesisManager
+                exported = ReferenceSynthesisManager(self.workspace).export_verified(study["id"])
+                if exported["hash"] != study["hash"]:
+                    raise ConflictError("阶段归并依赖已变化，请重建索引")
+                for row in exported["results"]:
+                    for section in ("stages", "main_lines", "character_arcs", "organization", "expression"):
+                        layer = "expression" if section == "expression" else "structure"
+                        if layer not in manifest["layers"]:
+                            continue
+                        for number, item in enumerate(row["result"][section]):
+                            content = json.dumps({key: val for key, val in item.items() if key != "source_refs"}, ensure_ascii=False)
+                            for start, end, chunk in _parts(content):
+                                locator = {"kind": "synthesis_result", "study_id": study["id"], "study_hash": study["hash"],
+                                           "node_id": row["node_id"], "section": section, "item": number,
+                                           "start_char": start, "end_char": end}
+                                yield _record(layer, chunk, locator, "阶段归并 · " + str(item.get("title", item.get("name", section))), item["source_refs"])
+                continue
             exported = ReferenceStudiesStore(self.workspace).export_verified(study["id"])
             for row in exported.get("results", []):
                 for section in ("events", "characters", "relationships", "knowledge", "threads", "rhythm", "per_book", "comparisons"):
@@ -628,9 +662,9 @@ class ReferenceRetrievalStore:
         else:
             # Derived observations are few; rebuild and compare exact records
             # using the same dependency validator used when indexing.
-            if outbound and kind in ("batch", "study", "study_result"):
+            if outbound and kind in ("batch", "study", "study_result", "synthesis_result"):
                 study_books = set()
-                if kind in ("study", "study_result"):
+                if kind in ("study", "study_result", "synthesis_result"):
                     frozen = next((study for study in manifest["studies"] if study["id"] == locator["study_id"]), None)
                     if frozen is None:
                         raise ConflictError("研究不在索引冻结范围内")

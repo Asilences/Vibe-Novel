@@ -186,6 +186,9 @@ def preview_reference_methods(workspace, book_id, batch_id, node_id, method_indi
 
 
 def validate_research_origin(workspace, origin):
+    if isinstance(origin, dict) and origin.get("source_type") == "reference_synthesis":
+        from .reference_synthesis import ReferenceSynthesisManager
+        return ReferenceSynthesisManager(workspace).validate_origin(origin)
     if isinstance(origin, dict) and origin.get("source_type") == "reference_study":
         from .reference_studies import validate_study_origin
         return validate_study_origin(workspace, origin)

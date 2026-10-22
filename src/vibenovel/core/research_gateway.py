@@ -8,6 +8,7 @@ from __future__ import annotations
 import copy
 import math
 import re
+import uuid
 from urllib.parse import urlsplit
 from dataclasses import replace
 from pathlib import Path
@@ -16,6 +17,17 @@ from .files import atomic_write, digest, json_bytes, read_json, safe_path
 from .locking import ConflictError, project_lock
 from .project import utc_now
 from vibenovel.errors import VibeNovelError
+
+
+class _ResearchRunnerLease:
+    """Use the same lease as the study/evaluation sender, never an age heuristic."""
+    def __init__(self, workspace, relative):
+        self.workspace, self.relative = workspace, relative
+
+    def path(self, relative):
+        path = safe_path(self.workspace, self.relative + "/" + relative)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return path
 
 
 def structured_research_request_options(base_url, model):
@@ -71,7 +83,157 @@ class ResearchGateway:
                     "reserved_cost_usd": sum(item["reserved_cost_usd"] for item in attempts),
                     "reported_cost_usd": sum(item.get("reported_cost_usd", 0) for item in attempts),
                     "uncertain_calls": sum(item["state"] in {"reserved", "unknown"} or item.get("billing_uncertain", False) for item in attempts),
-                    "revision": value["revision"]}
+                    "revision": value["revision"],
+                    "pending_reconciliations": [self._public_pending(item) for item in value["attempts"].values()
+                        if item["state"] in {"reserved", "unknown"}]}
+
+    def _response_bytes(self, attempt_id):
+        path = self.path("responses/" + attempt_id + ".json")
+        if not path.exists():
+            return None
+        with path.open("rb") as stream:
+            raw = stream.read(4 * 1024 * 1024 + 1)
+        if len(raw) > 4 * 1024 * 1024:
+            raise ConflictError("研究缓存超过核对上限，保留原记录")
+        return raw
+
+    def _public_pending(self, item):
+        raw = self._response_bytes(item["id"])
+        return {name: copy.deepcopy(item.get(name)) for name in
+                ("id", "state", "model", "created_at", "reserved_cost_usd")} | {
+                    "attempt_hash": digest(json_bytes(item)),
+                    "cached_response_hash": digest(raw) if raw is not None else None}
+
+    def _reconciliation_owner(self, attempt_id):
+        """Find a persisted sender contract; generic/unattributed calls fail closed."""
+        owners = []
+        for kind, folder in (("study", "library/studies"), ("evaluation", "library/evaluations"),
+                             ("synthesis", "library/syntheses")):
+            root = safe_path(self.workspace, folder)
+            if not root.exists():
+                continue
+            paths = list(root.glob("*/manifest.json"))
+            if len(paths) > 10000:
+                raise ConflictError("研究清单过大，未推断请求归属")
+            for path in paths:
+                record_id = path.parent.name
+                if not re.fullmatch(r"[0-9a-f]{32}", record_id):
+                    continue
+                record = read_json(safe_path(self.workspace, folder + "/" + record_id + "/manifest.json"), max_bytes=8 * 1024 * 1024)
+                nodes = record.get("nodes", [])
+                if not isinstance(nodes, list) or any(not isinstance(node, dict) for node in nodes):
+                    raise ConflictError("研究执行节点格式无效，未推断请求归属")
+                for node in nodes:
+                    key = node.get("attempt_key")
+                    if isinstance(key, str) and digest(key.encode("utf-8"))[:32] == attempt_id:
+                        plan = record.get("plan")
+                        planned = plan.get("nodes") if isinstance(plan, dict) else None
+                        if (record.get("id") != record_id or not isinstance(record.get("plan"), dict)
+                                or digest(json_bytes(record["plan"])) != record.get("plan_hash")
+                                or not isinstance(planned, list)
+                                or any(not isinstance(item, dict) for item in planned)
+                                or [item.get("id") for item in planned] != [item.get("id") for item in nodes]
+                                or not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", node.get("id", ""))):
+                            raise ConflictError("研究归属或冻结计划校验失败，保留账本")
+                        owners.append({"kind": kind, "id": record_id, "node_id": node["id"], "folder": folder,
+                            "runner": folder + ("/.runners/" + record_id if kind == "study" else "/" + record_id + "/runner")})
+        if len(owners) != 1:
+            raise ConflictError("无法唯一确认原研究执行器，不能将请求标为停止；保留费用与原状态")
+        return owners[0]
+
+    def _frozen_reconciliation_preview(self, owner, attempt):
+        request_path = safe_path(self.workspace, owner["folder"] + "/" + owner["id"] +
+            "/requests/" + owner["node_id"] + ".json")
+        if not request_path.exists():
+            raise ConflictError("未找到原执行器保存的请求，不能核对原报价；保留费用与状态")
+        request = read_json(request_path, max_bytes=8 * 1024 * 1024)
+        preview = request.get("preview", {})
+        if not isinstance(preview, dict):
+            raise ConflictError("原请求冻结预览格式无效，保留账本")
+        unhashed = {name: value for name, value in preview.items() if name != "hash"}
+        if (not isinstance(request.get("prompt"), str) or not isinstance(request.get("attempt_key"), str)
+                or digest(request["attempt_key"].encode("utf-8"))[:32] != attempt["id"]
+                or preview.get("hash") != digest(json_bytes(unhashed))
+                or preview.get("hash") != attempt.get("preview_hash")
+                or preview.get("prompt_hash") != attempt.get("prompt_hash")
+                or digest(request["prompt"].encode("utf-8")) != attempt.get("prompt_hash")):
+            raise ConflictError("原请求或冻结报价指纹无效，不能核对缓存费用")
+        for name in ("price_input_usd", "price_output_usd"):
+            amount = preview.get(name)
+            if type(amount) not in (int, float) or not math.isfinite(amount) or amount <= 0:
+                raise ConflictError("原请求价格未知，未改动账本")
+        return preview
+
+    def reconcile(self, attempt_id, *, action, expected_attempt_hash, expected_response_hash, reason):
+        if not re.fullmatch(r"[0-9a-f]{32}", attempt_id):
+            raise VibeNovelError("研究请求编号无效")
+        if action not in ("mark_unknown", "restore_response") or not isinstance(reason, str) or not 1 <= len(reason.strip()) <= 2000:
+            raise VibeNovelError("请选择核对动作并填写1至2000字符的核对说明")
+        owner = self._reconciliation_owner(attempt_id)
+        # The sender holds its runner lease throughout its network call. Acquire
+        # it before the account lock (the same lock order as sending). An old
+        # timestamp or a client assertion cannot substitute for this proof.
+        with project_lock(_ResearchRunnerLease(self.workspace, owner["runner"]), timeout=0):
+            if self._reconciliation_owner(attempt_id) != owner:
+                raise ConflictError("原请求归属变化，请重新核对")
+            with project_lock(self, timeout=2):
+                account = self._load()
+                attempt = account["attempts"].get(attempt_id)
+                if attempt is None or digest(json_bytes(attempt)) != expected_attempt_hash:
+                    raise ConflictError("研究账本已变化，请刷新后核对")
+                if attempt["state"] not in ("reserved", "unknown"):
+                    raise ConflictError("仅进行中或费用未知的请求可核对，不改写已有成功记录")
+                preview = self._frozen_reconciliation_preview(owner, attempt)
+                raw = self._response_bytes(attempt_id)
+                actual_hash = digest(raw) if raw is not None else None
+                if actual_hash != expected_response_hash:
+                    raise ConflictError("原响应缓存已变化，请刷新后核对")
+                before = copy.deepcopy(attempt)
+                if action == "mark_unknown":
+                    if raw is not None or attempt["state"] != "reserved":
+                        raise ConflictError("已有缓存须核验恢复；未知请求不重复修改")
+                    attempt.update(state="unknown", billing_uncertain=True,
+                        error="已显式核对原执行器无活动；结果及费用仍未知，保留预留金额，不自动重发")
+                else:
+                    if raw is None:
+                        raise ConflictError("未找到原响应缓存，不能按已完成入账")
+                    saved = read_json(self.path("responses/" + attempt_id + ".json"), max_bytes=4 * 1024 * 1024)
+                    if (set(saved) != {"text", "usage", "model", "finish_reason"} or not isinstance(saved["text"], str)
+                            or len(saved["text"].encode("utf-8")) > 3 * 1024 * 1024
+                            or saved["model"] not in (None, attempt.get("model"))
+                            or saved["finish_reason"] is not None and not isinstance(saved["finish_reason"], str)
+                            or saved["usage"] is not None and not isinstance(saved["usage"], dict)):
+                        raise ConflictError("原响应缓存格式或模型无效，保留原费用与状态")
+                    if attempt.get("response_hash") not in (None, actual_hash):
+                        raise ConflictError("原响应缓存与已存指纹不一致，保留原记录")
+                    usage = saved["usage"] or {}
+                    valid_usage = all(type(usage.get(key)) is int and usage[key] >= 0
+                                      for key in ("prompt_tokens", "completion_tokens"))
+                    if any(key in usage and (type(usage[key]) is not int or usage[key] < 0)
+                           for key in ("prompt_tokens", "completion_tokens")):
+                        raise ConflictError("缓存Token用量无效，未修改费用")
+                    attempt.update(state="succeeded", response_hash=actual_hash, completed_at=utc_now(),
+                        usage=saved["usage"], finish_reason=saved["finish_reason"], billing_uncertain=not valid_usage)
+                    attempt.pop("error", None)
+                    if valid_usage:
+                        try:
+                            reported = (usage["prompt_tokens"] * preview["price_input_usd"] +
+                                        usage["completion_tokens"] * preview["price_output_usd"]) / 1_000_000
+                        except OverflowError:
+                            raise ConflictError("缓存Token用量超出核算范围，未修改费用") from None
+                        if not math.isfinite(reported):
+                            raise ConflictError("缓存Token费用超出核算范围，未修改费用")
+                        attempt["reported_cost_usd"] = reported
+                        attempt["reserved_cost_usd"] = max(attempt["reserved_cost_usd"], reported)
+                audit_id = uuid.uuid4().hex
+                audit = {"id": audit_id, "attempt_id": attempt_id, "action": action, "reason": reason.strip(),
+                    "at": utc_now(), "owner": {key: owner[key] for key in ("kind", "id", "node_id")},
+                    "before": before, "after_state": attempt["state"], "cached_response_hash": actual_hash,
+                    "reserved_cost_usd": attempt["reserved_cost_usd"], "network_requests": 0}
+                atomic_write(self.path("reconciliations/" + audit_id + ".json"), json_bytes(audit))
+                attempt.setdefault("reconciliations", []).append({"id": audit_id, "hash": digest(json_bytes(audit))})
+                self._save(account)
+        return self.status()
 
     def configure(self, *, model_id, max_cost_usd, price_input_usd, price_output_usd,
                   price_source="", max_calls=256, expected_hash=None):

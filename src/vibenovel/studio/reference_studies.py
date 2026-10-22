@@ -147,12 +147,7 @@ class ReferenceStudiesManager:
         return request
 
     def _selections(self, source, segment, kind):
-        detail = self.store.books.detail(source["book_id"], source["edition_id"], limit=200)
-        chapters = list(detail["chapters"])
-        offset = len(chapters)
-        while offset < detail["total_chapters"]:
-            page = self.store.books.detail(source["book_id"], source["edition_id"], offset=offset, limit=200)
-            chapters.extend(page["chapters"]); offset += len(page["chapters"])
+        detail, chapters = self._chapter_directory(source)
         indexed = {chapter["chapter_id"]: chapter for chapter in chapters}
         requested = source.get("chapter_ids", [])
         if not isinstance(requested, list) or len(requested) > 20000 or len(set(requested)) != len(requested) or any(key not in indexed for key in requested):
@@ -196,6 +191,15 @@ class ReferenceStudiesManager:
                     "whole_current_file": not requested and ranges is None,
                     "completeness": "出版版本及自然章完整性未确认；范围以当前文件为准"}
         return snapshots, coverage
+
+    def _chapter_directory(self, source):
+        detail = self.store.books.detail(source["book_id"], source["edition_id"], limit=200)
+        chapters = list(detail["chapters"])
+        offset = len(chapters)
+        while offset < detail["total_chapters"]:
+            page = self.store.books.detail(source["book_id"], source["edition_id"], offset=offset, limit=200)
+            chapters.extend(page["chapters"]); offset += len(page["chapters"])
+        return detail, chapters
 
     def _plan(self, request):
         if self.gateway is None:
@@ -247,6 +251,124 @@ class ReferenceStudiesManager:
         plan, _ = self._plan(request)
         return {"hash": digest(json_bytes(plan)), **plan}
 
+    def _extension_plan(self, study_id, budget_max_usd):
+        if self.gateway is None:
+            raise VibeNovelError("研究API网关尚未配置；不会追加未知模型的付费范围")
+        study = self.store.load(study_id)
+        if (study["state"] not in ("succeeded", "paused")
+                or any(node["state"] not in ("pending", "succeeded") for node in study["nodes"])
+                or study["plan"]["request"]["kind"] != "reading"):
+            raise ConflictError("先暂停并核对所有已发送节点；仅无失败或未知收费的连续精读可追加")
+        export = self.store.export_verified(study_id)
+        if len(export["results"]) != sum(node["state"] == "succeeded" for node in study["nodes"]):
+            raise ConflictError("成功节点不构成连续前缀，不能追加")
+        old_plan = study["plan"]
+        request = copy.deepcopy(old_plan["request"])
+        request["budget_max_usd"] = budget_max_usd
+        request = self._request(request)
+        if old_plan.get("template_hash") != template_hash("reading"):
+            raise ConflictError("研究模板已变化，不能把新模板附加到原初读链")
+        source = request["sources"][0]
+        _, chapters = self._chapter_directory(source)
+        indexed = {chapter["chapter_id"]: chapter for chapter in chapters}
+        ranges = [ref for node in old_plan["nodes"] for ref in node["ranges"]]
+        if not ranges or any(ref["book_id"] != source["book_id"] or ref["edition_id"] != source["edition_id"]
+                             or ref["chapter_id"] not in indexed for ref in ranges):
+            raise ConflictError("原冻结计划的来源范围失效")
+        last_order = indexed[ranges[-1]["chapter_id"]]["order"]
+        old_ids = list(dict.fromkeys(ref["chapter_id"] for ref in ranges))
+        eligible, excluded = [], []
+        for chapter in chapters:
+            reasons = []
+            if chapter["kind"] != "body": reasons.append("附属文本")
+            if not chapter["characters"]: reasons.append("空章段")
+            if chapter.get("incomplete") or chapter.get("needs_review"): reasons.append("异常待核")
+            if chapter.get("duplicate_of"): reasons.append("重复候选")
+            if reasons:
+                excluded.append({"chapter_id": chapter["chapter_id"], "title": chapter["title"], "reasons": reasons,
+                                 "already_selected": chapter["chapter_id"] in old_ids})
+            else:
+                eligible.append(chapter)
+        # Only full chapter boundaries can be extended. No hidden backfill into
+        # the past and no insertion between existing checkpoints is allowed.
+        prefix = [chapter for chapter in eligible if chapter["order"] <= last_order]
+        for chapter_id in set(old_ids) | {chapter["chapter_id"] for chapter in prefix}:
+            parts = [part for part in ranges if part["chapter_id"] == chapter_id]
+            cursor = 0
+            for part in parts:
+                if part["start_char"] != cursor:
+                    raise ConflictError("原范围不是完整章段的连续正文前缀；不能回填旧时点")
+                cursor = part["end_char"]
+            if cursor != indexed[chapter_id]["characters"]:
+                raise ConflictError("仅支持在完整章段边界追加，请先核对原阅读范围")
+        tail = [chapter for chapter in eligible if chapter["order"] > last_order]
+        if not tail:
+            raise VibeNovelError("当前版本没有可追加的后续有效正文；异常和附属范围保留待核")
+        expanded_source = {"book_id": source["book_id"], "edition_id": source["edition_id"],
+                           "chapter_ids": old_ids + [chapter["chapter_id"] for chapter in tail]}
+        snapshots, coverage = self._selections(expanded_source, request["segment_characters"], "reading")
+        count = len(old_plan["nodes"])
+        inputs = [[snapshot] for snapshot in snapshots]
+        if len(inputs) <= count:
+            raise ConflictError("追加范围没有新节点")
+        for node, parts in zip(old_plan["nodes"], inputs[:count]):
+            if node["snapshot_hashes"] != [part["hash"] for part in parts]:
+                raise ConflictError("来源版本或授权变化，原冻结前缀不再相同；未重读")
+            current_ranges = [{name: ref[name] for name in ("book_id", "edition_id", "chapter_id", "start_char", "end_char")}
+                              for part in parts for ref in part["refs"]]
+            if current_ranges != node["ranges"]:
+                raise ConflictError("新范围会改变原阅读前缀，未追加")
+        nodes = copy.deepcopy(old_plan["nodes"])
+        additional_cost = 0.0
+        for index, parts in enumerate(inputs[count:], count):
+            prompt = study_prompt("reading", request["question"], parts, estimate=True)
+            quote = self.gateway.preview(prompt, request["max_output_tokens"])
+            amount = quote.get("estimated_cost_usd")
+            if (quote.get("model_identity", quote.get("model_id")) != old_plan["model_identity"]
+                    or type(amount) not in (int, float) or not math.isfinite(amount) or amount < 0):
+                raise ConflictError("追加模型或报价与冻结研究不兼容")
+            additional_cost += amount
+            nodes.append({"id": "read-%05d" % (index + 1), "order": index,
+                          "snapshot_hashes": [part["hash"] for part in parts],
+                          "ranges": [{name: ref[name] for name in ("book_id", "edition_id", "chapter_id", "start_char", "end_char")}
+                                     for part in parts for ref in part["refs"]],
+                          "characters": sum(part["characters"] for part in parts), "estimate": quote})
+        total_cost = old_plan["estimated_cost_usd"] + additional_cost
+        if total_cost > request["budget_max_usd"]:
+            raise VibeNovelError("追加后的整批保守报价超过本研究总预算，请明确调整预算后重新预览")
+        request["sources"] = [expanded_source]
+        plan = copy.deepcopy(old_plan)
+        plan.update(request=request, sources=[coverage], nodes=nodes, estimated_cost_usd=total_cost)
+        plan["coverage"] = {**old_plan["coverage"], "sources": [coverage], "selected_characters": coverage["characters"],
+                            "selection_policy": "保留原冻结前缀，仅追加后续有效正文；附属、异常、重复候选明确排除",
+                            "excluded_chapters": excluded}
+        if len(json_bytes(plan)) > MAX_RECORD - 65536:
+            raise VibeNovelError("追加冻结计划超过8MiB；未截断")
+        value = {"schema_version": 1, "study_id": study_id, "base_hash": digest(json_bytes(study)),
+                 "base_plan_hash": study["plan_hash"], "plan": plan, "old_nodes": count,
+                 "added_nodes": len(nodes)-count, "added_characters": sum(node["characters"] for node in nodes[count:]),
+                 "additional_estimated_cost_usd": additional_cost, "estimated_cost_usd": total_cost,
+                 "excluded_chapters": excluded, "warnings": ["只追加原书后续有效正文，不改旧节点/请求/检查点", "保存后暂停，仍须明确启动才付费",
+                                                          "排除范围不计作已读，当前文件不等于出版版本完整"]}
+        value["hash"] = digest(json_bytes(value))
+        return value, study, inputs
+
+    def preview_extension(self, study_id, budget_max_usd):
+        with self._lock, project_lock(_RunnerLock(self.store, study_id), timeout=0):
+            value, _, _ = self._extension_plan(study_id, budget_max_usd)
+            return value
+
+    def extend(self, study_id, budget_max_usd, expected_preview, idempotency_key):
+        with self._lock, project_lock(_RunnerLock(self.store, study_id), timeout=0):
+            saved = self.store.extension_result(study_id, idempotency_key, expected_preview, budget_max_usd)
+            if saved is not None:
+                return self.detail(study_id)
+            value, study, inputs = self._extension_plan(study_id, budget_max_usd)
+            if value["hash"] != expected_preview:
+                raise ConflictError("研究状态、来源、模型或追加预算已变化，请重新预览")
+            self.store.append_plan(study, value["plan"], inputs, expected_preview, idempotency_key)
+            return self.detail(study_id)
+
     def create(self, request, expected_preview, idempotency_key):
         # Repeated network submissions after an uncertain response are resolved
         # from the durable key before any changed configuration is evaluated.
@@ -268,6 +390,7 @@ class ReferenceStudiesManager:
             raise VibeNovelError("研究节点分页无效")
         return {**self.store.summary(study), "plan_hash": study["plan_hash"], "request": study["plan"]["request"],
                 "coverage": study["plan"]["coverage"], "estimated_cost_usd": study["plan"]["estimated_cost_usd"],
+                "plan_extensions": study.get("plan_extensions", []),
                 "warnings": study["plan"]["warnings"], "node_offset": offset,
                 "nodes": [{**copy.deepcopy(plan), **copy.deepcopy(progress), "has_response":
                           self.store.path(study_id + "/responses/" + progress["id"] + ".json").exists()} for plan, progress in
@@ -499,6 +622,15 @@ class StudyCreate(StudyRequest):
     idempotency_key: StrictStr = Field(min_length=16, max_length=80)
 
 
+class StudyExtension(StudyInput):
+    budget_max_usd: float = Field(gt=0, le=10000)
+
+
+class StudyExtensionCommit(StudyExtension):
+    expected_preview: StrictStr = Field(min_length=64, max_length=64)
+    idempotency_key: StrictStr = Field(min_length=16, max_length=80)
+
+
 class GraphEdit(StudyInput):
     expected_hash: StrictStr = Field(min_length=64, max_length=64)
     graphs: dict
@@ -525,6 +657,14 @@ def install_study_routes(app: FastAPI, workspace, gateway=None):
     @app.post("/api/reference-studies", status_code=201)
     def create(body: StudyCreate):
         return manager.create(body.model_dump(exclude={"expected_preview", "idempotency_key"}, exclude_none=True), body.expected_preview, body.idempotency_key)
+
+    @app.post("/api/reference-studies/{study_id}/extensions/preview")
+    def preview_extension(study_id: str, body: StudyExtension):
+        return manager.preview_extension(study_id, body.budget_max_usd)
+
+    @app.post("/api/reference-studies/{study_id}/extensions")
+    def extend(study_id: str, body: StudyExtensionCommit):
+        return manager.extend(study_id, body.budget_max_usd, body.expected_preview, body.idempotency_key)
 
     @app.get("/api/reference-studies/{study_id}")
     def detail(study_id: str, offset: int = Query(default=0, ge=0), limit: int = Query(default=50, ge=1, le=200)):

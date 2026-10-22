@@ -940,6 +940,46 @@ class ReferenceBookStore:
             raise ConflictError("参考书快照版本、授权或原文已过期")
         return True
 
+    def validate_snapshots(self, snapshots):
+        """Verify a bounded set in one locked operation; no persistent trust cache.
+
+        A long reading chain should hash each original and directory once per
+        validation, rather than once per checkpoint. Every subsequent operation
+        rereads the live catalog, original, metadata, text and source evidence.
+        """
+        if not isinstance(snapshots, list) or not 1 <= len(snapshots) <= MAX_CHAPTERS:
+            raise VibeNovelError("批量校验需要1至20000份参考书快照")
+        prepared, total = [], 0
+        for snapshot in snapshots:
+            if not isinstance(snapshot, dict):
+                raise VibeNovelError("参考书快照格式无效")
+            payload = copy.deepcopy(snapshot)
+            fingerprint = payload.pop("hash", None)
+            if fingerprint != digest(json_bytes(payload)):
+                raise ConflictError("参考书快照内容已变化")
+            selections = self._snapshot_selections(None,
+                [{key: ref.get(key) for key in ("chapter_id", "start_char", "end_char")}
+                 for ref in snapshot.get("refs", [])], snapshot.get("allow_partial", False))
+            total += sum(len(value.encode("utf-8")) for value in snapshot.get("texts", []))
+            if total > MAX_TEXT_BYTES:
+                raise VibeNovelError("批量校验总正文超过128MiB；未截断")
+            prepared.append((snapshot, selections))
+        with self._locked() as catalog:
+            before = self._catalog_hash()
+            contexts, caches = {}, {}
+            for snapshot, selections in prepared:
+                key = (snapshot.get("book_id"), snapshot.get("edition_id"))
+                if key not in contexts:
+                    contexts[key] = self._snapshot_context(catalog, *key)
+                    caches[key] = {}
+                expected = self._build_snapshot(key[0], contexts[key], selections,
+                    MAX_SNAPSHOT_CHARACTERS, snapshot.get("allow_partial", False), caches[key])
+                if expected != snapshot:
+                    raise ConflictError("参考书快照版本、授权或原文已过期")
+            if self._catalog_hash() != before:
+                raise ConflictError("批量校验期间参考授权或清单变化")
+        return True
+
     def search(self, book_id, q, *, edition_id=None, limit=20):
         _bounded(q, 200, empty=False)
         _range(0, limit, 100)

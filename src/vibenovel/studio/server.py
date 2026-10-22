@@ -52,6 +52,7 @@ from .reference_editions_api import install_edition_routes
 from .reference_retrieval_api import install_reference_retrieval_routes
 from .research_api import install_research_routes
 from .reference_evaluations_api import install_evaluation_routes
+from .reference_synthesis_api import install_synthesis_routes
 from vibenovel.core.research_gateway import ResearchGateway
 
 MAX_REQUEST_BYTES = 15 * 1024 * 1024
@@ -390,6 +391,7 @@ def create_app(workspace: Path, *, frontend_dir: Optional[Path] = None, job_mana
             app.state.reference_studies.close()
             app.state.reference_retrieval.close()
             app.state.reference_evaluations.close()
+            app.state.reference_syntheses.close()
             jobs.close()
 
     app = FastAPI(title="VibeNovel Studio", version=__version__, lifespan=lifespan,
@@ -405,6 +407,7 @@ def create_app(workspace: Path, *, frontend_dir: Optional[Path] = None, job_mana
     install_edition_routes(app, store.workspace)
     install_research_routes(app, store.workspace, app.state.research_gateway)
     app.state.reference_evaluations = install_evaluation_routes(app, store.workspace, app.state.research_gateway)
+    app.state.reference_syntheses = install_synthesis_routes(app, store.workspace, app.state.research_gateway)
 
     @app.exception_handler(ConflictError)
     async def conflict_error(request, exc):

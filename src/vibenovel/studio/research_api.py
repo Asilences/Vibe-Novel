@@ -1,5 +1,6 @@
 """Private research account and evidence-bound method publication routes."""
 from fastapi import FastAPI
+from typing import Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr
 
 from vibenovel.core.library import LibraryStore
@@ -23,6 +24,13 @@ class MethodSelection(Input):
     method_indices: list[StrictInt] = Field(min_length=1, max_length=6)
 
 
+class Reconciliation(Input):
+    action: Literal["mark_unknown", "restore_response"]
+    expected_attempt_hash: StrictStr = Field(min_length=64, max_length=64)
+    expected_response_hash: Optional[StrictStr] = Field(default=None, min_length=64, max_length=64)
+    reason: StrictStr = Field(min_length=1, max_length=2000)
+
+
 class MethodPublish(MethodSelection):
     expected_preview: StrictStr = Field(min_length=64, max_length=64)
     idempotency_key: StrictStr = Field(min_length=16, max_length=80)
@@ -36,6 +44,10 @@ def install_research_routes(app: FastAPI, workspace, gateway):
     @app.put("/api/research-account")
     def configure(body: Account):
         return gateway.configure(**body.model_dump())
+
+    @app.post("/api/research-account/attempts/{attempt_id}/reconcile")
+    def reconcile(attempt_id: str, body: Reconciliation):
+        return gateway.reconcile(attempt_id, **body.model_dump())
 
     @app.post("/api/reference-studies/{study_id}/methods/preview")
     def preview_methods(study_id: str, body: MethodSelection):

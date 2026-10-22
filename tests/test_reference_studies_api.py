@@ -72,6 +72,33 @@ class StudyAPITests(unittest.TestCase):
             self.assertIn(response.status_code, (400, 422), response.text)
         self.assertEqual(self.gateway.calls, [])
 
+    def test_http_extension_preview_commit_and_same_key_do_not_call_model(self):
+        request = self.request()
+        request["sources"][0]["chapter_ids"] = [self.book["chapters"][0]["chapter_id"]]
+        study = self.prepare(request)
+        self.assertEqual(self.post("/"+study["id"]+"/start").status_code, 200)
+        self.app.state.reference_studies._threads[study["id"]].join(timeout=15)
+        suffix = "/"+study["id"]+"/extensions"
+        preview = self.post(suffix+"/preview", {"budget_max_usd":2})
+        self.assertEqual(preview.status_code, 200, preview.text)
+        self.assertEqual(preview.json()["added_nodes"], 1)
+        payload={"budget_max_usd":2,"expected_preview":preview.json()["hash"],"idempotency_key":uuid.uuid4().hex}
+        denied=self.client.post("/api/reference-studies"+suffix,json=payload)
+        self.assertEqual(denied.status_code,403)
+        changed=self.post(suffix,{**payload,"budget_max_usd":3})
+        self.assertEqual(changed.status_code,409,changed.text)
+        result=self.post(suffix,payload)
+        self.assertEqual(result.status_code,200,result.text)
+        self.assertEqual(result.json()["state"],"paused")
+        self.assertEqual(result.json()["total_nodes"],2)
+        again=self.post(suffix,payload)
+        self.assertEqual(again.status_code,200,again.text)
+        self.assertEqual(again.json(),result.json())
+        changed=self.post(suffix,{**payload,"budget_max_usd":3})
+        self.assertEqual(changed.status_code,409,changed.text)
+        self.assertEqual(len(self.gateway.calls),1)
+        self.assertEqual(self.project.fingerprint(), self.canon)
+
     def test_late_policy_change_invalidates_prepared_and_published_method(self):
         study = self.prepare()
         started = self.post("/" + study["id"] + "/start")

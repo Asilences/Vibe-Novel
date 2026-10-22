@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { BookOpen, GitBranch, Pause, Play, RefreshCw, Search, Square } from "lucide-react";
 import { api, ApiError } from "./api";
 import { Modal } from "./ui";
+import ReferenceSynthesisPanel from "./ReferenceSynthesisPanel";
 import { graphWindow, studyEvidence, studyMethods } from "./referenceStudyHelpers";
 import type { StudyEvidence, StudyGraph, StudyGraphNode } from "./referenceStudyHelpers";
 import "./referenceStudies.css";
@@ -16,6 +17,7 @@ type Study = {sources?: {book_id:string;title:string}[]; id: string; hash: strin
 type StudyExport = Study & {results: {node_id: string; read_index: number; temporal_mode: string; result: Data}[]; graphs: Record<string, StudyGraph>; map_version?: string; map_version_stale?: boolean};
 type Preview = {hash: string; nodes: Data[]; estimated_cost_usd: number; sources: Data[]; warnings: string[]};
 type FrozenPreview = {value: Preview; request: Data; identity: string; key: string};
+type ExtensionPreview = {hash: string; study_id: string; old_nodes: number; added_nodes: number; added_characters: number; additional_estimated_cost_usd: number; estimated_cost_usd: number; excluded_chapters: {chapter_id:string;title:string;reasons:string[];already_selected:boolean}[]; warnings:string[]; plan: Data};
 type Props = {onDirtyChange?: (dirty: boolean) => void; onOpenMethods?: (entryId?: string) => void; onOpenBooks?: () => void; onOpenAccount?: () => void};
 const base = "/reference-studies", PAGE = 24;
 const DEFAULT_QUESTION = "分析内容推进、人物选择与代价、读者/角色当时知情、线索铺设及节奏变化";
@@ -58,12 +60,14 @@ export default function ReferenceStudiesWorkspace({onDirtyChange, onOpenMethods,
   const [nodePage, setNodePage] = useState(0), [nodeLabel, setNodeLabel] = useState(""), [nodeDescription, setNodeDescription] = useState(""), [editReason, setEditReason] = useState("");
   const [evidence, setEvidence] = useState<{ref: StudyEvidence; text: string} | null>(null), [repair, setRepair] = useState<{nodeId: string; hash: string; text: string; original: string} | null>(null), [repairReason, setRepairReason] = useState("");
   const [methodIndices, setMethodIndices] = useState<number[]>([]), [methodPreview, setMethodPreview] = useState<{value: Data; indices: number[]; key: string} | null>(null);
+  const [extending, setExtending] = useState(false), [extensionBudget, setExtensionBudget] = useState(""), [extensionPreview, setExtensionPreview] = useState<{value:ExtensionPreview;budget:number;key:string}|null>(null), [extensionUncertain, setExtensionUncertain] = useState(false);
+  const [synthesisDirty, setSynthesisDirty] = useState(false);
   const alive = useRef(true), gate = useRef(false), selection = useRef(0), selectedStudyId = useRef("");
   const dirtyCallback = useRef(onDirtyChange); dirtyCallback.current = onDirtyChange;
   const graphDirty = !!selectedNode && (nodeLabel !== selectedNode.label || nodeDescription !== selectedNode.description);
   const repairDirty = !!repair && (repair.text !== repair.original || !!repairReason.trim());
   const draftDirty = creating && (sources.length > 0 || kind !== "reading" || question !== DEFAULT_QUESTION || budget !== "1" || output !== 6144 || !!preview || uncertain);
-  const dirty = graphDirty || repairDirty || draftDirty || methodIndices.length > 0;
+  const dirty = graphDirty || repairDirty || draftDirty || methodIndices.length > 0 || extending || synthesisDirty;
   const request = {kind, sources, question, budget_max_usd: Number(budget), max_output_tokens: output, segment_characters: 12000};
   const requestIdentity = JSON.stringify(request), freshPreview = preview?.identity === requestIdentity;
   const active = !!study && ["running", "pausing"].includes(study.state);
@@ -97,6 +101,7 @@ export default function ReferenceStudiesWorkspace({onDirtyChange, onOpenMethods,
     if (alive.current && epoch === selection.current && selectedStudyId.current === id) {setStudy(detail); setExported(result);}
   }
   async function selectStudy(id: string) {
+    if (extending) {setError("请先保存或关闭追加范围预览；提交结果不明确时须沿原键核对。"); return;}
     if (draftDirty) {
       if (uncertain) {setError("保存结果尚不明确，请先沿原提交键核对；不要放弃草案后另建研究。"); return;}
       if (!(await requestConfirmation("当前研究草案尚未保存，确认放弃并打开历史研究？"))) return;
@@ -104,7 +109,7 @@ export default function ReferenceStudiesWorkspace({onDirtyChange, onOpenMethods,
     await openStudy(id);
   }
   async function openStudy(id: string, offset = 0) {
-    if (graphDirty || repair || methodIndices.length) {setError("请先保存或放弃当前编辑及方法选择，再切换研究。"); return;}
+    if (graphDirty || repair || methodIndices.length || synthesisDirty) {setError("请先保存或放弃当前编辑、归并预览及方法选择，再切换研究。"); return;}
     const epoch = ++selection.current; selectedStudyId.current = id;
     const detail = await api<Study>(`${base}/${id}?offset=${offset}&limit=50`);
     if (!alive.current || epoch !== selection.current) return;
@@ -128,7 +133,7 @@ export default function ReferenceStudiesWorkspace({onDirtyChange, onOpenMethods,
     if (alive.current) setEvidence({ref, text: result.text});
   }
   function reread(ref: StudyEvidence) {
-    if (graphDirty || repair || methodIndices.length) {setError("请先保存或放弃当前编辑，再建立补读。"); return;}
+    if (graphDirty || repair || methodIndices.length || synthesisDirty) {setError("请先保存或放弃当前编辑与归并预览，再建立补读。"); return;}
     const book = books.find((item) => item.book_id === ref.book_id); if (!book) return;
     setCreating(true); setKind("reread"); setSources([{book_id: ref.book_id, edition_id: ref.edition_id, chapter_ids: [], ranges: [{chapter_id: ref.chapter_id, start_char: Math.max(0, ref.start_char - 500), end_char: ref.end_char}]}]);
     setQuestion("复核以下证据的上下文、角色当时知情和原判断边界；只增加新的回看候选，不改写初读检查点"); setPreview(null); setEvidence(null); setNotice("已建立补读草案。请核对精确范围和预算，补读结果独立存证。"); void act(() => directory(book));
@@ -140,6 +145,28 @@ export default function ReferenceStudiesWorkspace({onDirtyChange, onOpenMethods,
     catch (failure) {if (!(failure instanceof ApiError) || failure.status >= 500) setUncertain(true); throw failure;}
   }
   async function control(action: string) {if (!study) return; const value = await api<Study>(`${base}/${study.id}/${action}`, "POST"); if (alive.current) {setStudy(value); await refreshList();}}
+  function beginExtension() {
+    if (!study) return;
+    setExtensionBudget(String(study.request?.budget_max_usd || study.estimated_cost_usd || 1));
+    setExtensionPreview(null); setExtensionUncertain(false); setExtending(true);
+  }
+  async function previewExtension() {
+    if (!study) return;
+    const value = await api<ExtensionPreview>(`${base}/${study.id}/extensions/preview`, "POST", {budget_max_usd:Number(extensionBudget)});
+    if (alive.current) setExtensionPreview({value,budget:Number(extensionBudget),key:crypto.randomUUID()});
+  }
+  async function saveExtension() {
+    if (!study || !extensionPreview || extensionPreview.budget!==Number(extensionBudget)) return;
+    try {
+      const value = await api<Study>(`${base}/${study.id}/extensions`, "POST", {budget_max_usd:extensionPreview.budget,expected_preview:extensionPreview.value.hash,idempotency_key:extensionPreview.key});
+      if (alive.current) {
+        setStudy(value); setExtending(false); setExtensionPreview(null); setExtensionUncertain(false);
+        await refreshList();
+        const result = await api<StudyExport>(`${base}/${study.id}/export`);
+        if (alive.current) {setExported(result); setNotice("后续正文已追加并保持暂停。旧请求、原响应和检查点保留；请核对后明确启动。");}
+      }
+    } catch (failure) {if (!(failure instanceof ApiError) || failure.status>=500) setExtensionUncertain(true); throw failure;}
+  }
   async function saveGraph() {
     if (!study || !exported || !selectedNode) return;
     const graphs = {...exported.graphs, [group]: {...exported.graphs[group], nodes: exported.graphs[group].nodes.map((node) => node.id === selectedNode.id ? {...node, label: nodeLabel, description: nodeDescription} : node)}};
@@ -175,7 +202,8 @@ export default function ReferenceStudiesWorkspace({onDirtyChange, onOpenMethods,
       </article>;})}
       {preview && <div className="rs-preview"><h4>付费范围与模型预览</h4><p>{preview.value.nodes.length} 个顺序节点 · 保守报价 {amount(preview.value.estimated_cost_usd)}</p><p>保存后保持“已准备”；启动才会调用 API。完整原文区间在已准备工程的节点清单中保留。</p><details><summary>展开模型、范围及覆盖清单</summary><pre>{JSON.stringify({sources: preview.value.sources, first_node: preview.value.nodes[0], warnings: preview.value.warnings}, null, 2)}</pre></details>{!freshPreview && <strong>输入已变化，须重新预览。</strong>}</div>}
       <div className="rs-actions"><button disabled={busy || uncertain || !sources.length || kind === "comparison" && (sources.length < 2 || sources.some((source) => !source.chapter_ids.length && !source.ranges))} onClick={() => void act(previewStudy)}>预览精确范围与报价</button><button disabled={busy || !freshPreview} onClick={() => void act(createStudy)}>{uncertain ? "核对同一份保存结果" : "保存为待启动研究"}</button><button disabled={busy || uncertain} onClick={async () => {if (draftDirty && !await requestConfirmation("当前研究草案尚未保存，确认放弃？")) return; setCreating(false); setSources([]); setPreview(null);}}>放弃草案</button></div>
-    </div> : study ? <><header className="rs-study-header"><div><span className="rs-eyebrow">{kindLabels[study.kind]} · {states[study.state] || study.state}</span><h3>{study.question}</h3><p>{study.completed_nodes} / {study.total_nodes} 个节点完成 · 预览 {amount(study.estimated_cost_usd)}</p></div><div className="rs-actions"><button disabled={busy || !["prepared", "paused"].includes(study.state)} onClick={() => void act(() => control("start"))}><Play size={14}/>启动精读</button><button disabled={busy || !active} onClick={() => void act(() => control("pause"))}><Pause size={14}/>暂停</button><button disabled={busy || ["succeeded", "cancelled"].includes(study.state)} onClick={() => void act(() => control("cancel"))}><Square size={14}/>取消</button></div></header>{study.error && <div className="rs-error"><p>{study.error}</p>{study.nodes?.some((node) => node.state === "failed" && node.has_response) && <button onClick={() => {setTab("reading"); setSelectedNode(null);}}>查看失败节点与离线修复</button>}</div>}
+    </div> : study ? <><header className="rs-study-header"><div><span className="rs-eyebrow">{kindLabels[study.kind]} · {states[study.state] || study.state}</span><h3>{study.question}</h3><p>{study.completed_nodes} / {study.total_nodes} 个节点完成 · 预览 {amount(study.estimated_cost_usd)}</p></div><div className="rs-actions"><button disabled={busy || !["prepared", "paused"].includes(study.state)} onClick={() => void act(() => control("start"))}><Play size={14}/>启动精读</button><button disabled={busy || !active} onClick={() => void act(() => control("pause"))}><Pause size={14}/>暂停</button><button disabled={busy || ["succeeded", "cancelled"].includes(study.state)} onClick={() => void act(() => control("cancel"))}><Square size={14}/>取消</button>{study.kind === "reading" && <button disabled={busy || dirty || !["succeeded", "paused"].includes(study.state)} onClick={beginExtension}>扩展阅读范围</button>}</div></header>{study.error && <div className="rs-error"><p>{study.error}</p>{study.nodes?.some((node) => node.state === "failed" && node.has_response) && <button onClick={() => {setTab("reading"); setSelectedNode(null);}}>查看失败节点与离线修复</button>}</div>}
+      <ReferenceSynthesisPanel studyId={study.id} state={study.state} completedNodes={study.completed_nodes} totalNodes={study.total_nodes} onDirtyChange={setSynthesisDirty}/>
       <nav className="rs-tabs">{[["graphs", "四组结构图"], ["reading", "阅读与知情检查点"], ["comparison", "跨书解法比较"], ["methods", "方法候选"]].map(([value, name]) => <button key={value} className={tab === value ? "active" : ""} disabled={graphDirty} onClick={() => {setTab(value); setSelectedNode(null);}}>{name}</button>)}</nav>
       {tab === "graphs" && exported && <><p className="rs-muted">完整保留所有已成功节点的结构与证据。每个视窗只展示部分节点，分页不会删除其余图谱；关系与评分是候选，仍需作者核对。</p><div className="rs-form-row"><label>图谱类型<select value={group} disabled={graphDirty} onChange={(event) => {setGroup(event.target.value); setSelectedNode(null);}}>{Object.entries(groups).map(([value, name]) => <option key={value} value={value}>{name}</option>)}</select></label><label>阅读时点<select value={checkpoint} disabled={graphDirty} onChange={(event) => {setCheckpoint(Number(event.target.value)); setSelectedNode(null);}}><option value={Number.MAX_SAFE_INTEGER}>全部已读范围</option>{exported.results.map((row) => <option key={row.node_id} value={row.read_index}>只看读完第 {row.read_index + 1} 段时</option>)}</select></label></div>{exported.map_version_stale && <p className="rs-notice">继续阅读后，旧人工图版本已归档；当前显示包含新证据的自动候选图，请重新核对。</p>}<Graph graph={exported.graphs[group]} group={group} checkpoint={checkpoint} onSelect={selectNode}/>
         {selectedNode && <article className="rs-node-detail"><h4>候选节点 · 阅读段 {selectedNode.read_index + 1}</h4>{active && <p className="rs-muted">研究运行中可回查证据；先暂停并等待当前请求完成，再编辑候选图。</p>}<label>标题<input disabled={busy || active} maxLength={500} value={nodeLabel} onChange={(event) => setNodeLabel(event.target.value)}/></label><label>解释<textarea disabled={busy || active} rows={3} maxLength={3000} value={nodeDescription} onChange={(event) => setNodeDescription(event.target.value)}/></label><Evidence refs={selectedNode.source_refs} onOpen={(ref) => void act(() => showEvidence(ref))} onReread={reread}/>{graphDirty && <><label>修改依据<input maxLength={2000} value={editReason} onChange={(event) => setEditReason(event.target.value)}/></label><div className="rs-actions"><button disabled={busy || !editReason.trim() || active} onClick={() => void act(saveGraph)}>保存新的候选图版本</button><button onClick={() => {setNodeLabel(selectedNode.label); setNodeDescription(selectedNode.description);}}>放弃修改</button></div></>}</article>}
@@ -187,5 +215,14 @@ export default function ReferenceStudiesWorkspace({onDirtyChange, onOpenMethods,
     {evidence && <Modal title="原文证据回查" subtitle={`固定版本 · 精确引文 [${evidence.ref.start_char}, ${evidence.ref.end_char})`} onClose={() => setEvidence(null)} wide><blockquote>{evidence.ref.quote}</blockquote><pre className="rs-original">{evidence.text}</pre><button onClick={() => reread(evidence.ref)}>建立上下文补读</button></Modal>}
     {repair && <Modal title="离线修复已保存响应" subtitle="人工或代理均可修复候选并重新验证证据；不重发API，原响应保留，不代表作者采用。" onClose={async () => {if (!busy && (!repairDirty || (await requestConfirmation("响应修复尚未保存，确认放弃？")))) {setRepair(null); setRepairReason("");}}} wide><label>候选JSON<textarea className="rs-json" rows={18} value={repair.text} onChange={(event) => setRepair({...repair, text: event.target.value})}/></label><label>修复说明<input value={repairReason} onChange={(event) => setRepairReason(event.target.value)}/></label><button disabled={busy || !repairReason.trim()} onClick={() => void act(saveRepair)}>校验证据并保存修复候选</button></Modal>}
     {methodPreview && <Modal title="保存研究方法候选" subtitle="不会调用模型，不会自动采用或选入作品。" onClose={() => setMethodPreview(null)} wide><pre className="rs-json">{JSON.stringify(methodPreview.value, null, 2)}</pre><button disabled={busy} onClick={() => void act(saveMethods)}>保存到个人方法候选</button></Modal>}
+    {extending && study && <Modal title="扩展阅读范围" subtitle="一键追加同版书籍后续有效正文，保留原阅读前缀与知情检查点。保存不调用模型，启动才付费。" onClose={() => {if (!busy && !extensionUncertain) {setExtending(false); setExtensionPreview(null);}}} wide>
+      {error && <p className="rs-error" role="alert">{error}</p>}
+      <p>会保留已选范围，只追加其后全部有效正文；附属文本、空章段、异常与重复候选会在预览中明确列出。不会把未读缺口算作完成。</p>
+      <label>本研究累计预算上限（美元）<input type="number" min="0.01" step="0.1" value={extensionBudget} disabled={busy || extensionUncertain} onChange={(event) => {setExtensionBudget(event.target.value);setExtensionPreview(null);}}/></label>
+      <button disabled={busy || extensionUncertain || !(Number(extensionBudget)>0)} onClick={() => void act(previewExtension)}>预览后续全部正文与报价</button>
+      {extensionPreview && <div className="rs-preview"><h4>追加精确范围与模型预览</h4><p>保留 {extensionPreview.value.old_nodes} 段，新增 {extensionPreview.value.added_nodes} 段、{extensionPreview.value.added_characters.toLocaleString()} 字符。</p><p>新增保守报价 {amount(extensionPreview.value.additional_estimated_cost_usd)}；整项研究累计保守报价 {amount(extensionPreview.value.estimated_cost_usd)}。</p><p>排除或保留待核 {extensionPreview.value.excluded_chapters.length} 个章段：</p><ul>{extensionPreview.value.excluded_chapters.map((chapter) => <li key={chapter.chapter_id}>{chapter.title}：{chapter.reasons.join("、")}{chapter.already_selected ? "（原前缀已选，保留原记录）" : "（不追加）"}</li>)}</ul><details><summary>展开冻结模型、全部精确区间与预算</summary><pre>{JSON.stringify(extensionPreview.value.plan,null,2)}</pre></details><ul>{extensionPreview.value.warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul>
+      <button disabled={busy || extensionPreview.budget!==Number(extensionBudget)} onClick={() => void act(saveExtension)}>{extensionUncertain ? "沿原提交键核对追加结果" : "确认追加范围并保持暂停"}</button></div>}
+      {extensionUncertain && <p role="alert">提交结果尚不明确，保留原预览和提交键；请核对同一份结果，不要重新创建。</p>}
+    </Modal>}
   </section>;
 }
