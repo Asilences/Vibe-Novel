@@ -346,7 +346,98 @@ class ReferenceStudiesStore:
             previous = extension["new_plan_hash"]
         if previous is not None and previous != study["plan_hash"]:
             raise ConflictError("当前研究计划不在追加版本链中")
+        continuation = study["plan"].get("continuation")
+        if continuation is not None:
+            parent = read_json(self.path(study_id + "/continuation-parent.json"), max_bytes=MAX_RECORD)
+            count = continuation["prefix_nodes"]
+            if (digest(json_bytes(parent)) != continuation["parent_manifest_hash"]
+                    or parent["id"] != continuation["parent_study_id"]
+                    or parent["plan_hash"] != continuation["parent_plan_hash"]
+                    or digest(json_bytes(parent["plan"])) != parent["plan_hash"]
+                    or type(count) is not int or not 0 < count < len(study["nodes"])
+                    or study["plan"]["nodes"][:count] != parent["plan"]["nodes"][:count]
+                    or [node.get("result_hash") for node in parent["nodes"][:count]] != continuation["prefix_result_hashes"]
+                    or any(node["state"] != "succeeded" for node in parent["nodes"][:count])):
+                raise ConflictError("续读分支的父工程或已读前缀指纹失效")
+            for index, node in enumerate(study["nodes"][:count]):
+                if (node["state"] != "succeeded" or node.get("result_hash") != continuation["prefix_result_hashes"][index]
+                        or node.get("inherited_from") != {"study_id": parent["id"], "node_id": parent["nodes"][index]["id"]}
+                        or any(name in node for name in ("attempt_key", "reserved_usd", "request_preview"))):
+                    raise ConflictError("续读分支不能重写已读结果或复制原收费请求身份")
         return study
+
+    def create_continuation(self, parent, plan, inputs, expected_preview, key):
+        """Publish an explicitly prepared branch without modifying its parent or account.
+
+        Inherited result files keep their original bytes and checkpoint hashes.
+        Only unsent/explicitly permitted uncertain tail nodes get new identities.
+        """
+        branch_id = digest(("continuation_" + parent["id"] + "_" + key).encode("utf-8"))[:32]
+        self.extension_id(key)
+        with self.locked():
+            if self.path(branch_id + "/manifest.json").exists():
+                branch = self.load(branch_id)
+                if branch.get("continuation_preview") != expected_preview or branch["idempotency_key"] != key:
+                    raise ConflictError("续读分支提交键已有不同内容")
+                return branch
+            if self.load(parent["id"]) != parent:
+                raise ConflictError("父研究在准备续读分支时已变化")
+            for listed in self.list_studies():
+                other = self.load(listed["id"])
+                if other["plan"].get("continuation", {}).get("parent_study_id") == parent["id"]:
+                    raise ConflictError("此父工程已有续读分支，请核对原分支，不另建重复收费工程")
+            origin = plan["continuation"]
+            if origin["unknown_attempts"] and not origin["allow_uncertain_reread"]:
+                raise ConflictError("未知片段未明确允许新补读，只能预览，未保存续读分支")
+            count = origin["prefix_nodes"]
+            if (origin["parent_manifest_hash"] != digest(json_bytes(parent))
+                    or origin["parent_study_id"] != parent["id"]
+                    or plan["nodes"][:count] != parent["plan"]["nodes"][:count]
+                    or len(plan["nodes"]) != len(inputs) or len(plan["nodes"]) != len(parent["nodes"])):
+                raise ConflictError("续读分支范围与父工程不匹配")
+            if any(any(node[name] != old[name] for name in ("id", "order", "ranges", "snapshot_hashes", "characters"))
+                   for node, old in zip(plan["nodes"], parent["plan"]["nodes"])):
+                raise ConflictError("续读分支不能改变原节点来源区间")
+            snapshots = [snapshot for parts in inputs for snapshot in parts]
+            self.books.validate_snapshots(snapshots)
+            values = [(self.path(branch_id + "/continuation-parent.json"), json_bytes(parent))]
+            for index, (node, parts) in enumerate(zip(plan["nodes"], inputs)):
+                if [part["hash"] for part in parts] != node["snapshot_hashes"]:
+                    raise ConflictError("续读分支输入与冻结范围不一致")
+                values.append((self.path(branch_id + "/inputs/" + node["id"] + ".json"), json_bytes({"snapshots": parts})))
+                if index < count:
+                    self.node_result(parent, index)
+                    raw = self.path(parent["id"] + "/results/" + node["id"] + ".json").read_bytes()
+                    if digest(raw) != origin["prefix_result_hashes"][index]:
+                        raise ConflictError("继承结果在复制前发生变化")
+                    values.append((self.path(branch_id + "/results/" + node["id"] + ".json"), raw))
+            preparation_path = self.path(branch_id + "/continuation-preparation.json")
+            preparation = {"preview_hash": expected_preview, "plan_hash": digest(json_bytes(plan)), "created_at": utc_now()}
+            if preparation_path.exists():
+                existing = read_json(preparation_path)
+                if any(existing[name] != preparation[name] for name in ("preview_hash", "plan_hash")):
+                    raise ConflictError("已有不同的未发布续读分支；未覆盖")
+                preparation = existing
+            nodes = [{"id": node["id"], "state": "pending"} for node in plan["nodes"]]
+            for index in range(count):
+                nodes[index].update(state="succeeded", result_hash=origin["prefix_result_hashes"][index],
+                    inherited_from={"study_id": parent["id"], "node_id": parent["nodes"][index]["id"]})
+            study = {"schema_version": 1, "id": branch_id, "plan": plan, "plan_hash": preparation["plan_hash"],
+                     "idempotency_key": key, "continuation_preview": expected_preview, "state": "prepared", "revision": 1,
+                     "created_at": preparation["created_at"], "updated_at": preparation["created_at"], "nodes": nodes, "error": None}
+            if any(len(raw) > MAX_RECORD for _, raw in values) or len(json_bytes(study)) > MAX_RECORD:
+                raise VibeNovelError("续读分支记录超过8MiB；未发布")
+            if not preparation_path.exists():
+                self._write(preparation_path, preparation)
+            for path, raw in values:
+                if path.exists():
+                    if path.read_bytes() != raw:
+                        raise ConflictError("续读分支路径已有不同文件；未覆盖历史")
+                else:
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    atomic_write(path, raw)
+            self._write(self.path(branch_id + "/manifest.json"), study)
+            return self.load(branch_id)
 
     @staticmethod
     def extension_id(key):
@@ -509,7 +600,8 @@ class ReferenceStudiesStore:
         if digest(raw) != node.get("result_hash"):
             raise ConflictError("研究结果缺失或被修改")
         result = read_json(path, max_bytes=MAX_RECORD)
-        if result.get("node_id") != node["id"] or result.get("study_id") != study["id"]:
+        expected_study = node.get("inherited_from", {}).get("study_id", study["id"])
+        if result.get("node_id") != node["id"] or result.get("study_id") != expected_study:
             raise ConflictError("研究结果不属于当前研究节点")
         return result
 
@@ -521,6 +613,9 @@ class ReferenceStudiesStore:
                  "read_index": index, "prior_checkpoint_hash": prior_hash,
                  "temporal_mode": "first_read" if study["plan"]["request"]["kind"] == "reading" else "retrospective",
                  "created_at": utc_now(), "result": result}
+        if study["plan"].get("continuation"):
+            value["temporal_mode"] = "continuation_read"
+            value["continuation_parent"] = study["plan"]["continuation"]["parent_study_id"]
         path = self.path(study["id"] + "/results/" + study["nodes"][index]["id"] + ".json")
         if path.exists():
             # A process may have stopped after publishing an immutable result

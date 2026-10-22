@@ -16,6 +16,7 @@ Studio 页面是操作入口；付费请求、检查点、原响应、费用记�
 | 列出／读取研究 | `GET /api/reference-studies`、`GET /api/reference-studies/{id}` |
 | 新研究预览／保存 | `POST /api/reference-studies/preview`、`POST /api/reference-studies` |
 | 同工程追加剩余正文预览／保存 | `POST /api/reference-studies/{id}/extensions/preview`、`POST /api/reference-studies/{id}/extensions` |
+| 中断后的显式续读分支预览／保存 | `POST /api/reference-studies/{id}/continuations/preview`、`POST /api/reference-studies/{id}/continuations` |
 | 启动／暂停 | `POST /api/reference-studies/{id}/start`、`POST /api/reference-studies/{id}/pause` |
 | 读取／离线修复失败原响应 | `GET`、`PUT /api/reference-studies/{id}/nodes/{node_id}/response` |
 | 导出已验证的阅读记录与四组候选图 | `GET /api/reference-studies/{id}/export` |
@@ -26,6 +27,10 @@ Studio 页面是操作入口；付费请求、检查点、原响应、费用记�
 保存研究、追加范围、归并与方法候选均须使用对应预览 hash 和固定幂等键；成功保存为待启动并不等于已经启动。断线后先读原状态，不能换一个键重建相同付费任务。全书追加只允许同书同版、相同问题及模型的严格原前缀，已发送节点须全部成功。封面、目录、异常与重复候选在预览中单列；“序”等解析为正文的附属介绍仍应在研究缺口中说明。
 
 ## 异常与费用
+
+原连续工程因未知请求中断、且模板已更新时，可显式准备续读分支。它逐字节继承成功前缀的结果与检查点，冻结父清单、全部前缀结果hash和原范围；新尾部使用当前模板和模型，旧工程与账本不改。仅无缓存且已核对为unknown的节点可申请另行付费补读，必须有作者明确许可，不能把“继续”当作自动重试授权。请求的`allow_uncertain_reread`须为布尔值，缺少许可时只可预览，禁止保存分支；`uncertain_reread_max_usd`独立限制这些新补读的累计预留，旧未知占用仍计入共享账户。提交另绑定预览hash、固定幂等键和`reason`；同一父工程仅允许一个续读分支。启动、发送及返回发布前重验父工程、缓存、旧账、版本和授权，变化即阻止发布并保留原响应。
+
+运行调度器必须尊重页面暂停和取消，不得把作者暂停状态当作需要自动恢复的异常。关闭网页不等于暂停；作者明确暂停/取消后，保留全部已发送请求，不自动重启该工程。
 
 暂停会等待当前请求落盘后停止新请求。未知费用不会因进程停止、页面关闭、服务器重启或预算提高而清零。旧请求核对先验证归属、冻结请求与执行器锁；有缓存则核算原响应，没有缓存只可标为费用未知并保留预留，不重新发送。
 

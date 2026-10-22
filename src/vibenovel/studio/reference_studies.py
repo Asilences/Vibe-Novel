@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Literal, Optional
 
 from fastapi import FastAPI, Query
-from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr
 
 from vibenovel.core.files import digest, json_bytes, read_json
 from vibenovel.core.locking import ConflictError, project_lock
@@ -251,6 +251,127 @@ class ReferenceStudiesManager:
         plan, _ = self._plan(request)
         return {"hash": digest(json_bytes(plan)), **plan}
 
+    def _continuation_unknowns(self, parent, count):
+        """Prove each abandoned send is unknown, without writing its account."""
+        pending = None
+        uncertain = []
+        for node in parent["nodes"][count:]:
+            response = self.store.path(parent["id"] + "/responses/" + node["id"] + ".json")
+            request = self.store.path(parent["id"] + "/requests/" + node["id"] + ".json")
+            if response.exists():
+                raise ConflictError("后续节点已有原响应，请先离线修复或恢复缓存，不新建收费补读")
+            if node["state"] == "pending" and not node.get("attempt_key") and not request.exists():
+                continue
+            if node["state"] not in ("interrupted", "failed") or not isinstance(node.get("attempt_key"), str) or not request.exists():
+                raise ConflictError("后续节点的发送状态无法安全续接；保留原记录")
+            if pending is None:
+                if not hasattr(self.gateway, "status"):
+                    raise ConflictError("无法核验原请求私人账本，不能准备未知收费补读")
+                pending = {item["id"]: item for item in self.gateway.status()["pending_reconciliations"]}
+            attempt_id = digest(node["attempt_key"].encode("utf-8"))[:32]
+            account = pending.get(attempt_id)
+            if account is None or account["state"] != "unknown" or account.get("cached_response_hash") is not None:
+                raise ConflictError("原请求必须已核对为unknown且无缓存响应；不重放或清除原费用")
+            frozen = read_json(request, max_bytes=MAX_RECORD)
+            if (frozen.get("attempt_key") != node["attempt_key"] or frozen.get("preview") != node.get("request_preview")
+                    or not isinstance(frozen.get("prompt"), str)
+                    or digest(frozen["prompt"].encode("utf-8")) != node.get("prompt_hash")):
+                raise ConflictError("原未知请求的提示或报价指纹失效")
+            uncertain.append({"node_id": node["id"], "attempt_id": attempt_id,
+                "attempt_hash": account["attempt_hash"], "state": "unknown",
+                "reserved_cost_usd": account["reserved_cost_usd"], "request_hash": digest(json_bytes(frozen)),
+                "policy": "旧请求及未知费用原样保留；新分支为一次另行批准的付费补读"})
+        return uncertain
+
+    def _continuation_plan(self, study_id, budget_max_usd, allow_uncertain_reread, uncertain_reread_max_usd, reason):
+        if self.gateway is None:
+            raise VibeNovelError("请先配置私人研究账户")
+        if type(allow_uncertain_reread) is not bool:
+            raise VibeNovelError("未知请求补读许可必须明确为true或false")
+        if (type(uncertain_reread_max_usd) not in (float, int)
+                or not math.isfinite(uncertain_reread_max_usd) or not 0 < uncertain_reread_max_usd <= 10000):
+            raise VibeNovelError("未知片段新补读费用上限须为正数")
+        reason = text(reason, 2000, "续读分支依据")
+        parent = self.store.load(study_id)
+        if (parent["state"] not in ("paused", "interrupted", "failed")
+                or parent["plan"]["request"]["kind"] != "reading" or parent["plan"].get("continuation")):
+            raise ConflictError("仅停止的原连续阅读工程可建立续读分支；不自动分叉或重放分支")
+        export = self.store.export_verified(study_id)
+        count = len(export["results"])
+        if not 0 < count < len(parent["nodes"]) or any(node["state"] == "succeeded" for node in parent["nodes"][count:]):
+            raise ConflictError("续读需要可验证的非空成功前缀，不能跳过知识缺口")
+        uncertain = self._continuation_unknowns(parent, count)
+        request = self._request({**copy.deepcopy(parent["plan"]["request"]), "budget_max_usd": budget_max_usd})
+        # Requote only prepares local snapshots. The branch cap covers its new
+        # sends; the private account still retains all earlier occupied money.
+        plan, inputs = self._plan({**request, "budget_max_usd": 10000})
+        if len(plan["nodes"]) != len(parent["nodes"]):
+            raise ConflictError("当前解析不能逐节点对应原冻结范围，未续接")
+        for old, current in zip(parent["plan"]["nodes"], plan["nodes"]):
+            if any(old[name] != current[name] for name in ("id", "order", "snapshot_hashes", "ranges", "characters")):
+                raise ConflictError("来源版本、授权或分段范围变化，未继承已读前缀")
+        plan["nodes"][:count] = copy.deepcopy(parent["plan"]["nodes"][:count])
+        estimate = sum(node["estimate"]["estimated_cost_usd"] for node in plan["nodes"][count:])
+        uncertain_ids = {item["node_id"] for item in uncertain}
+        uncertain_estimate = sum(node["estimate"]["estimated_cost_usd"] for node in plan["nodes"][count:] if node["id"] in uncertain_ids)
+        if estimate > budget_max_usd or uncertain_estimate > uncertain_reread_max_usd:
+            raise VibeNovelError("新续读或未知片段补读的保守报价超过明确上限，未准备")
+        origin = {"schema_version": 1, "parent_study_id": study_id, "parent_manifest_hash": digest(json_bytes(parent)),
+            "parent_plan_hash": parent["plan_hash"], "prefix_nodes": count,
+            "prefix_result_hashes": [row["result_hash"] for row in export["results"]], "unknown_attempts": uncertain,
+            "allow_uncertain_reread": allow_uncertain_reread, "uncertain_reread_max_usd": uncertain_reread_max_usd,
+            "reason": reason, "historical_costs": "原工程与私人账户费用保留，不转移、不清零、不重复计为本分支收费"}
+        plan.update(request=request, estimated_cost_usd=estimate, continuation=origin)
+        plan["coverage"] = {**plan["coverage"], "inherited_successful_segments": count,
+            "new_request_segments": len(plan["nodes"])-count, "continuation_parent": study_id,
+            "uncertain_reread_segments": len(uncertain)}
+        plan["warnings"] += ["成功前缀原始结果及检查点不变；续读使用当前模板/模型，并保留模板转换边界",
+            "未知费用仍占私人账户累计上限；false许可只能预览，明确许可后才能保存和启动分支"]
+        value = {"schema_version": 1, "parent_study_id": study_id, "plan": plan, "inherited_nodes": count,
+            "new_nodes": len(plan["nodes"])-count, "estimated_cost_usd": estimate,
+            "uncertain_reread_estimated_cost_usd": uncertain_estimate,
+            "requires_uncertain_reread_permission": bool(uncertain) and not allow_uncertain_reread}
+        value["hash"] = digest(json_bytes(value))
+        return value, parent, inputs
+
+    def preview_continuation(self, study_id, budget_max_usd, allow_uncertain_reread=False, uncertain_reread_max_usd=.04, reason="显式准备连续研究续读分支"):
+        with self._lock, project_lock(_RunnerLock(self.store, study_id), timeout=0):
+            value, _, _ = self._continuation_plan(study_id, budget_max_usd, allow_uncertain_reread, uncertain_reread_max_usd, reason)
+            return value
+
+    def create_continuation(self, study_id, budget_max_usd, expected_preview, idempotency_key,
+                            allow_uncertain_reread=False, uncertain_reread_max_usd=.04, reason="显式准备连续研究续读分支"):
+        with self._lock, project_lock(_RunnerLock(self.store, study_id), timeout=0):
+            branch_id = digest(("continuation_" + study_id + "_" + idempotency_key).encode("utf-8"))[:32]
+            if self.store.path(branch_id + "/manifest.json").exists():
+                old = self.store.load(branch_id)
+                origin = old["plan"].get("continuation", {})
+                if (old.get("continuation_preview") != expected_preview or old["idempotency_key"] != idempotency_key
+                        or old["plan"]["request"]["budget_max_usd"] != budget_max_usd
+                        or origin.get("allow_uncertain_reread") != allow_uncertain_reread
+                        or origin.get("uncertain_reread_max_usd") != uncertain_reread_max_usd or origin.get("reason") != reason):
+                    raise ConflictError("原续读提交键已绑定另一份范围、预算或许可")
+                return self.detail(branch_id)
+            value, parent, inputs = self._continuation_plan(study_id, budget_max_usd, allow_uncertain_reread, uncertain_reread_max_usd, reason)
+            if value["hash"] != expected_preview:
+                raise ConflictError("父工程、私人账本、来源、当前模型或补读许可变化，请重新预览")
+            if value["requires_uncertain_reread_permission"]:
+                raise ConflictError("未知收费片段尚未明确允许新的付费补读；仅可预览，不保存分支")
+            branch = self.store.create_continuation(parent, value["plan"], inputs, expected_preview, idempotency_key)
+            return self.detail(branch["id"])
+
+    def _validate_continuation_start(self, study):
+        origin = study["plan"].get("continuation")
+        if not origin:
+            return
+        if origin["unknown_attempts"] and not origin["allow_uncertain_reread"]:
+            raise ConflictError("未知收费片段尚未明确允许新的付费补读，禁止执行")
+        parent = self.store.load(origin["parent_study_id"])
+        if digest(json_bytes(parent)) != origin["parent_manifest_hash"]:
+            raise ConflictError("父工程已变化，请核对，未发送续读")
+        if self._continuation_unknowns(parent, origin["prefix_nodes"]) != origin["unknown_attempts"]:
+            raise ConflictError("原未知账本或缓存变化，未发送续读")
+
     def _extension_plan(self, study_id, budget_max_usd):
         if self.gateway is None:
             raise VibeNovelError("研究API网关尚未配置；不会追加未知模型的付费范围")
@@ -391,6 +512,7 @@ class ReferenceStudiesManager:
         return {**self.store.summary(study), "plan_hash": study["plan_hash"], "request": study["plan"]["request"],
                 "coverage": study["plan"]["coverage"], "estimated_cost_usd": study["plan"]["estimated_cost_usd"],
                 "plan_extensions": study.get("plan_extensions", []),
+                "continuation": study["plan"].get("continuation"),
                 "warnings": study["plan"]["warnings"], "node_offset": offset,
                 "nodes": [{**copy.deepcopy(plan), **copy.deepcopy(progress), "has_response":
                           self.store.path(study_id + "/responses/" + progress["id"] + ".json").exists()} for plan, progress in
@@ -446,6 +568,7 @@ class ReferenceStudiesManager:
                     raise ConflictError("仅准备/暂停且没有未知收费或失败节点的研究可启动；先核对或离线修复")
                 if study["plan"].get("template_hash") != template_hash(study["plan"]["request"]["kind"]):
                     raise ConflictError("研究提示模板已更新或旧计划未冻结模板；保留已有结果，请重新预览未发送范围，不重放已付费节点")
+                self._validate_continuation_start(study)
                 self.store.export_verified(study_id)
                 event = threading.Event(); self._cancel[study_id] = event
                 launch = {"ready": threading.Event(), "go": threading.Event(), "error": None}
@@ -517,6 +640,14 @@ class ReferenceStudiesManager:
                         amount = quote.get("estimated_cost_usd")
                         if type(amount) not in (int, float) or not math.isfinite(amount) or amount < 0 or reserved + amount > request["budget_max_usd"]:
                             raise ConflictError("本研究预留费用达到上限，停止新请求")
+                        origin = study["plan"].get("continuation")
+                        if origin and origin["unknown_attempts"]:
+                            self._validate_continuation_start(study)
+                            uncertain_ids = {item["node_id"] for item in origin["unknown_attempts"]}
+                            if study["nodes"][index]["id"] in uncertain_ids:
+                                occupied = sum(node.get("reserved_usd", 0) for node in study["nodes"] if node["id"] in uncertain_ids)
+                                if occupied + amount > origin["uncertain_reread_max_usd"]:
+                                    raise ConflictError("未知片段新补读达到单独授权上限，停止发送")
                         node = study["nodes"][index]
                         node.update(state="running", request_preview=quote, prompt_hash=digest(prompt.encode("utf-8")),
                                     reserved_usd=amount, attempt_key="study_" + study_id + "_" + node["id"])
@@ -538,6 +669,7 @@ class ReferenceStudiesManager:
                         if cancel.is_set() or study["state"] == "cancelled":
                             study["nodes"][index]["state"] = "cancelled"; self.store.save(study); return
                         result, previous_hash = self._validated_output(study, index, raw)
+                        self._validate_continuation_start(study)
                         self.store.publish_result(study, index, result, previous_hash)
         except Exception as exc:
             if launch is not None and not acquired:
@@ -574,10 +706,12 @@ class ReferenceStudiesManager:
             if prior["hash"] != expected_hash:
                 raise ConflictError("保存的原响应指纹变化")
             result, previous_hash = self._validated_output(study, index, raw)
+            self._validate_continuation_start(study)
             import uuid
             version_id = uuid.uuid4().hex
             self.store._write(self.store.path(study_id + "/response-repairs/" + version_id + ".json"),
                 {"node_id": node_id, "original_hash": expected_hash, "text": raw, "reason": text(reason, 2000, "修复说明"), "provenance": "REPAIRED_CANDIDATE"})
+            self._validate_continuation_start(study)
             self.store.publish_result(study, index, result, previous_hash)
             study["state"] = "paused" if any(node["state"] != "succeeded" for node in study["nodes"]) else "succeeded"
             study["error"] = None; self.store.save(study)
@@ -631,6 +765,18 @@ class StudyExtensionCommit(StudyExtension):
     idempotency_key: StrictStr = Field(min_length=16, max_length=80)
 
 
+class StudyContinuation(StudyInput):
+    budget_max_usd: float = Field(gt=0, le=10000)
+    allow_uncertain_reread: StrictBool = False
+    uncertain_reread_max_usd: float = Field(default=.04, gt=0, le=10000)
+    reason: StrictStr = Field(min_length=1, max_length=2000)
+
+
+class StudyContinuationCommit(StudyContinuation):
+    expected_preview: StrictStr = Field(min_length=64, max_length=64)
+    idempotency_key: StrictStr = Field(min_length=16, max_length=80)
+
+
 class GraphEdit(StudyInput):
     expected_hash: StrictStr = Field(min_length=64, max_length=64)
     graphs: dict
@@ -661,6 +807,14 @@ def install_study_routes(app: FastAPI, workspace, gateway=None):
     @app.post("/api/reference-studies/{study_id}/extensions/preview")
     def preview_extension(study_id: str, body: StudyExtension):
         return manager.preview_extension(study_id, body.budget_max_usd)
+
+    @app.post("/api/reference-studies/{study_id}/continuations/preview")
+    def preview_continuation(study_id: str, body: StudyContinuation):
+        return manager.preview_continuation(study_id, **body.model_dump())
+
+    @app.post("/api/reference-studies/{study_id}/continuations", status_code=201)
+    def create_continuation(study_id: str, body: StudyContinuationCommit):
+        return manager.create_continuation(study_id, **body.model_dump())
 
     @app.post("/api/reference-studies/{study_id}/extensions")
     def extend(study_id: str, body: StudyExtensionCommit):

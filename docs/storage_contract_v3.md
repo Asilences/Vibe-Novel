@@ -229,3 +229,5 @@ a10当时交付四层资料设计的语料基础与候选研究流程，尚无�
 旧账核对保存`library/research/account/reconciliations/`不可变前态、原请求归属、动作、缓存hash和费用说明。核对须取得原study/evaluation/synthesis执行器的同一跨进程锁，不能根据时间推定已停止。无缓存只能reserved→unknown且全部预留保留；有缓存须匹配冻结请求/报价，核算也不减少原占用。不改变原研究节点成功状态，不发送新请求。
 
 阶段归并保存于`library/syntheses/<id>/`，详见`reference_synthesis_v3.md`。来源包括连续研究版本、全部结果hash、模板和书籍授权；每个后续层只使用已成功子节点的有界候选及精确引文，不回填首次知情。未采用方法须保留`reference_synthesis`来源；来源过期时不能洗掉依赖再采用。索引可重建，不替代原件、初读结果、归并原响应和同一私人研究账本。
+
+显式续读分支保留`continuation-parent.json`和`continuation-preparation.json`，计划中的`continuation`冻结父清单/计划hash、成功前缀hash、旧未知attempt与独立补读许可和上限。继承结果原始字节和初读检查点不变，节点仅带`inherited_from`，不复制旧`attempt_key`、费用预留或请求身份；历史账本仍只归属原工程。未成功尾部绑定当前提示模板/模型，新结果标记`continuation_read`，不改写历史初读知情。保存遵循幂等、只写不存在文件和最终清单发布；同父仅一分支。执行前重验父清单及unknown账本，若存在可恢复响应则拒绝新增付费补读。
