@@ -95,6 +95,7 @@ import EditorialTaskScopePreview, { editorialGoalOptions } from "./EditorialTask
 import { suggestProposalTarget } from "./proposalTarget";
 import ChaptersWorkspace from "./ChaptersWorkspace";
 import { nextDraftPath } from "./chapterManagement";
+import { ConfirmationHost, requestConfirmation } from "./confirm";
 
 type Area =
   | "dashboard"
@@ -205,6 +206,9 @@ export default function App() {
   const [showNewDoc, setShowNewDoc] = useState(false);
   const [newPath, setNewPath] = useState("");
   const [newDocContent, setNewDocContent] = useState("");
+  const newDocumentIdentity = JSON.stringify([showNewDoc, newPath, newDocContent]);
+  const newDocumentIdentityRef = useRef(newDocumentIdentity);
+  newDocumentIdentityRef.current = newDocumentIdentity;
   const [showHistory, setShowHistory] = useState(false);
   const [versions, setVersions] = useState<Version[]>([]);
   const [versionId, setVersionId] = useState("");
@@ -268,17 +272,26 @@ export default function App() {
       setNotice({ text, type }),
     [],
   );
-  const allowLeave = useCallback(
-    () =>
-      (!dirty && !childDirty) ||
-      window.confirm(
-        "当前页面有未保存的修改。离开可能放弃这些修改，仍要继续吗？",
-      ),
-    [dirty, childDirty],
-  );
-  function navigate(next: Area): boolean {
+  const leaveIdentity = JSON.stringify([area, project?.novel_id, doc?.path, doc?.hash, source, childDirty]);
+  const leaveRevision = useRef({ identity: leaveIdentity, revision: 0 });
+  if (leaveRevision.current.identity !== leaveIdentity) {
+    leaveRevision.current = { identity: leaveIdentity, revision: leaveRevision.current.revision + 1 };
+  }
+  const allowLeave = useCallback(async (): Promise<boolean> => {
+    if (!dirty && !childDirty) return true;
+    const expected = leaveRevision.current.revision;
+    const accepted = await requestConfirmation("当前页面有未保存的修改。放弃修改后会离开当前页面，已保存的内容保持不变。");
+    // Confirmation is asynchronous: an older prompt cannot discard inputs
+    // belonging to a page or document that changed while the author decided.
+    if (accepted && leaveRevision.current.revision !== expected) {
+      notify("确认期间页面或文稿已变化，已保留当前修改。请重新选择要进行的操作。", "error");
+      return false;
+    }
+    return accepted;
+  }, [dirty, childDirty, notify]);
+  async function navigate(next: Area): Promise<boolean> {
     if (next === area) return true;
-    if (!allowLeave()) return false;
+    if (!await allowLeave()) return false;
     if (next !== "library") setLibraryReturn(null);
     setArea(next);
     return true;
@@ -388,7 +401,7 @@ export default function App() {
   }, [project, documents, refresh]);
 
   async function selectProject(id: string, approved = false) {
-    if (!approved && !allowLeave()) return;
+    if (!approved && !await allowLeave()) return;
     currentProject.current = id;
     docRequest.current += 1;
     setDoc(null);
@@ -444,7 +457,7 @@ export default function App() {
     line?: number,
     expectedHash?: string,
   ): Promise<boolean> {
-    if (!project || ((path !== doc?.path || discard || childDirty) && !allowLeave())) return false;
+    if (!project || ((path !== doc?.path || discard || childDirty) && !await allowLeave())) return false;
     if (path === "outlines/source/creative-brief.json" || path === "reviews/creation-selection.json") {
       setArea("creation"); return true;
     }
@@ -558,7 +571,7 @@ export default function App() {
       title: String(fields.get("title") || "").trim() || "未命名作品",
       genre: String(fields.get("genre")),
     };
-    if (!allowLeave()) return;
+    if (!await allowLeave()) return;
     const sourceAtStart = sourceRef.current;
     const request = docRequest.current;
     const id = currentProject.current;
@@ -600,9 +613,11 @@ export default function App() {
     setNewDocContent("");
     setShowNewDoc(true);
   }
-  function closeNewDocument() {
+  async function closeNewDocument() {
     if (busy === "new-document") return;
-    if (newDocContent.trim() && !window.confirm("新文稿的内容尚未保存，确定放弃并关闭吗？")) return;
+    const expected = newDocumentIdentityRef.current;
+    if (newDocContent.trim() && !await requestConfirmation("新文稿的内容尚未保存，确定放弃并关闭吗？")) return;
+    if (newDocumentIdentityRef.current !== expected) return;
     setShowNewDoc(false);
   }
   function adaptImported() {
@@ -613,7 +628,7 @@ export default function App() {
   }
   async function createDocument(event: FormEvent) {
     event.preventDefault();
-    if (!project || !allowLeave()) return;
+    if (!project || !await allowLeave()) return;
     const request = ++docRequest.current;
     const id = project.novel_id;
     const sourceAtStart = sourceRef.current;
@@ -645,8 +660,8 @@ export default function App() {
     setLatestImport(null);
     setShowSources(true);
   }
-  function useImportedOutline(item: Imported) {
-    if (!project || (!planningArea && !allowLeave())) return;
+  async function useImportedOutline(item: Imported) {
+    if (!project || (!planningArea && !await allowLeave())) return;
     const path = importedSourcePath(item);
     setPlanningSource(path);
     setPlanningSourceRequest((current) => ({ path, nonce: (current?.nonce || 0) + 1 }));
@@ -829,7 +844,7 @@ export default function App() {
     });
   }
   async function applyProposal(item: Approval) {
-    if (!project || !allowLeave()) return;
+    if (!project || !await allowLeave()) return;
     const id = project.novel_id;
     const request = docRequest.current;
     const sourceAtStart = sourceRef.current;
@@ -874,7 +889,7 @@ export default function App() {
     });
   }
   async function restoreVersion() {
-    if (!project || !doc || !versionId || locked || !allowLeave()) return;
+    if (!project || !doc || !versionId || locked || !await allowLeave()) return;
     const request = docRequest.current;
     const id = project.novel_id;
     const sourceAtStart = source;
@@ -905,8 +920,8 @@ export default function App() {
     setTaskPreview(null);
     notify(`已固定选区 [${range.start_char}, ${range.end_char})，区间之外保留原文。`);
   }
-  function openEditorMaterialLibrary() {
-    if (!project || !allowLeave()) return;
+  async function openEditorMaterialLibrary() {
+    if (!project || !await allowLeave()) return;
     setEditorMaterialsOpen(false);
     setLibraryReturn(null);
     setLibraryTarget({ view: "retrieval", nonce: Date.now() });
@@ -948,13 +963,13 @@ export default function App() {
     });
   }
   async function openLibrary(novelId: string, entryId?: string) {
-    if (!allowLeave()) return;
+    if (!await allowLeave()) return;
     if (project?.novel_id !== novelId) await selectProject(novelId, true);
     if (currentProject.current !== novelId) return;
     setLibraryTarget({ view: entryId ? "all" : "method", entry: entryId, nonce: Date.now() }); setArea("library");
   }
   async function openLibraryTasks(novelId: string, jobId?: string) {
-    if (!allowLeave()) return;
+    if (!await allowLeave()) return;
     if (project?.novel_id !== novelId) await selectProject(novelId, true);
     if (currentProject.current !== novelId) return;
     setSelectedJob(jobId || ""); setArea("tasks");
@@ -1062,7 +1077,7 @@ export default function App() {
   const selectedTask = jobs.find((item) => item.id === selectedJob) || jobs[0];
   const retryBlocked = selectedTask ? jobRetryGate(selectedTask, jobs) : null;
   async function returnToTaskInput(job: Job) {
-    if (!project || !allowLeave()) return;
+    if (!project || !await allowLeave()) return;
     if (job.workflow_id) { setArea("models"); return; }
     if (job.kind === "generate_story_outline") { setArea("creation"); return; }
     if (["analyze_reference", "extract_methods"].includes(job.kind)) { await openLibrary(project.novel_id); return; }
@@ -1107,7 +1122,7 @@ export default function App() {
       </a>
       {activeReference && <div className="task-reference-banner" role="status">已固定检索资料，供本书下一次任务使用。<button className="text-button" onClick={() => setTaskReference(null)}>取消本次选用</button></div>}
       <header className="topbar">
-        <div className="brand">
+        <div className="brand" aria-label="VibeNovel Studio">
           <div className="brand-mark">
             <Feather size={21} strokeWidth={1.7} />
           </div>
@@ -1147,7 +1162,7 @@ export default function App() {
           />
           {ready ? "本地工作区" : fatal ? "连接失败" : "正在连接"}
         </span>
-        <button className="button small secondary" onClick={() => setShowGuide(true)}><BookOpen size={14} />使用手册</button>
+        <button className="button small secondary guide-button" aria-label="使用手册" title="使用手册" onClick={() => setShowGuide(true)}><BookOpen size={14} /><span>使用手册</span></button>
         <button
           className="button small secondary export-button"
           disabled={!project || !!busy}
@@ -1309,8 +1324,8 @@ export default function App() {
         <div className="sidebar-bottom">
           <button onClick={() => setShowSettings(true)}><Settings2 size={16} /><span>模型与 API 设置</span><ArrowUpRight size={13} /></button>
           <button
-            onClick={() => {
-              if (!allowLeave()) return; setLibraryTarget({ view: "sources", nonce: Date.now() }); setArea("library");
+            onClick={async () => {
+              if (!await allowLeave()) return; setLibraryTarget({ view: "sources", nonce: Date.now() }); setArea("library");
             }}
           >
             <FolderOpen size={16} />
@@ -1635,10 +1650,10 @@ export default function App() {
             onChanged={() => refresh(project.novel_id)} onDirtyChange={setChildDirty}
             onSettings={() => setShowSettings(true)}
             onOpenDocument={(path) => void openDocument(path)}
-            onPlanning={(path) => { if (!allowLeave()) return; setPlanningForm(null); setPlanningSource(path); setPlanningPath(""); setArea("planning"); }}
+            onPlanning={async (path) => { if (!await allowLeave()) return; setPlanningForm(null); setPlanningSource(path); setPlanningPath(""); setArea("planning"); }}
             onJob={(job) => { setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)]); void refresh(project.novel_id); }} />
         ) : area === "models" ? (
-          <MultiModelWorkspace key={project.novel_id} project={project} documents={documents} onDirtyChange={setChildDirty} onSaved={async () => { const boot = await api<Bootstrap>("/bootstrap"); setBootstrap(boot); setToken(boot.csrf_token); await refresh(project.novel_id); }} onOpen={(path) => void openDocument(path)} onTask={(id) => { if (!navigate("tasks")) return; setSelectedJob(id); void refresh(project.novel_id); }} />
+          <MultiModelWorkspace key={project.novel_id} project={project} documents={documents} onDirtyChange={setChildDirty} onSaved={async () => { const boot = await api<Bootstrap>("/bootstrap"); setBootstrap(boot); setToken(boot.csrf_token); await refresh(project.novel_id); }} onOpen={(path) => void openDocument(path)} onTask={async (id) => { if (!await navigate("tasks")) return; setSelectedJob(id); void refresh(project.novel_id); }} />
         ) : area === "manuscript" ? (
           <ManuscriptWorkspace key={project.novel_id} project={project} documents={documents} imports={imports} jobs={jobs} providers={bootstrap?.capabilities.providers || []} onSettings={() => setShowSettings(true)} onImport={() => openImport("manuscript")} onRefresh={() => refresh(project.novel_id)} onOpen={(path, line, expectedHash) => void openDocument(path, true, false, line, expectedHash)} onJob={(job) => { setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)]); void refresh(project.novel_id); }} />
         ) : area === "analysis" ? (
@@ -1662,13 +1677,13 @@ export default function App() {
             initialTab={area === "characters" ? "characters" : area === "timeline" ? "timeline" : area === "style" ? "style" : "overview"}
             onDirtyChange={setChildDirty}
             onImport={() => openImport("planning")}
-            onPaste={() => { if (!allowLeave()) return; setArea("outlines"); setNewPath("outlines/proposals/book.md"); setNewDocContent(""); setShowNewDoc(true); }}
+            onPaste={async () => { if (!await allowLeave()) return; setArea("outlines"); setNewPath("outlines/proposals/book.md"); setNewDocContent(""); setShowNewDoc(true); }}
             onSource={(path, line) =>
               void openDocument(path, true, false, line)
             }
-            onTasks={(id) => {
+            onTasks={async (id) => {
+              if (!await navigate("tasks")) return;
               if (id) setSelectedJob(id);
-              setArea("tasks");
             }}
             onJob={(job) => {
               const id = project.novel_id;
@@ -2932,7 +2947,7 @@ export default function App() {
           wide
         >
           <p className="form-note">{importIntent === "planning" ? "可导入散文总纲、卷纲或情节要点，结构无需与 Studio 模板一致。原文保留，后续生成的是待审规划候选。" : importIntent === "manuscript" ? "导入已写正文后，先在已有小说修订中检查分章。导入本身不会生成定稿或让故事事件自动生效。" : "先选择原件编码，再选择文件。每次重新打开导入入口都会恢复自动识别。"}</p>
-          {latestImport && <div className="repair-card" role="status"><div><CircleCheck size={18} /><strong>已导入：{latestImport.original_name}</strong></div><p>原件与提取文本已保存。来源材料仍需你确认，尚未调用模型。</p>{importIntent !== "manuscript" && <button type="button" className="button primary small" disabled={!!busy} onClick={() => useImportedOutline(latestImport)}>用这份大纲继续规划<ArrowRight size={14} /></button>}{importIntent === "manuscript" && <button type="button" className="button primary small" disabled={!!busy} onClick={() => { if (area !== "manuscript" && !allowLeave()) return; setShowSources(false); setArea("manuscript"); }}>返回已有小说修订<ArrowRight size={14} /></button>}</div>}
+          {latestImport && <div className="repair-card" role="status"><div><CircleCheck size={18} /><strong>已导入：{latestImport.original_name}</strong></div><p>原件与提取文本已保存。来源材料仍需你确认，尚未调用模型。</p>{importIntent !== "manuscript" && <button type="button" className="button primary small" disabled={!!busy} onClick={() => useImportedOutline(latestImport)}>用这份大纲继续规划<ArrowRight size={14} /></button>}{importIntent === "manuscript" && <button type="button" className="button primary small" disabled={!!busy} onClick={async () => { if (area !== "manuscript" && !await allowLeave()) return; setShowSources(false); setArea("manuscript"); }}>返回已有小说修订<ArrowRight size={14} /></button>}</div>}
           <div className="source-list">
             {imports.length ? (
               imports.map((item) => (
@@ -3002,8 +3017,8 @@ export default function App() {
       )}
       {responseJob && <Modal title="原始模型响应 · 只读" subtitle="保留原始返回与计费记录；关闭或查看不会调用模型，也不会发布或定稿。" onClose={() => setResponseJob(null)} wide><div className="modal-form"><p>{responseJob.response_archived ? "模型已返回，但任务未成功发布。此为原始归档，不能作为当前有效结果、审批或定稿依据。" : responseJob.finish_reason === "length" ? "供应商报告已达到输出上限。" : "供应商未返回完整可用文本。"}{responseJob.response_repaired ? " 后续人工修复候选不改变这里的原始记录。" : ""}</p>{responseJob.response_candidate ? <label>已返回内容<textarea aria-label="原始模型响应（只读）" readOnly value={responseJob.response_candidate} rows={18} /></label> : <p className="analysis-warning">没有返回正文。已知 Token 用量仍记录在任务费用中，不能按未调用或零费用处理。</p>}<div className="modal-footer"><button className="button secondary" onClick={() => setResponseJob(null)}>关闭</button></div></div></Modal>}
       {editorMaterialsOpen && project && <Modal title="选择本次任务资料与参考书" subtitle="只选择和本次任务有关的卡片、方法与原书片段；选择本身不调用模型。" wide onClose={() => setEditorMaterialsOpen(false)}><TaskMaterialPicker novelId={project.novel_id} purpose={taskMaterialPurpose(taskKind)} value={effectiveEditorMaterials} disabled={!!busy || taskUncertain} onChange={(selection) => { setEditorMaterialSelection(selection || {}); setTaskPreview(null); }} onOpenLibrary={openEditorMaterialLibrary} /><div className="modal-footer"><button type="button" className="button secondary" disabled={!!busy || taskUncertain} onClick={() => { setEditorMaterialSelection({}); setTaskPreview(null); }}>清空本次资料选择</button><button type="button" className="button primary" onClick={() => setEditorMaterialsOpen(false)}>完成选择，返回助手</button></div></Modal>}
-      {taskPreview && <Modal title="确认本次模型任务" subtitle="预览不会调用模型；确认后按固定文稿、模型与资料版本提交。" wide onClose={() => { if (!busy && (!taskUncertain || window.confirm("提交结果仍不明确。关闭后请先在任务记录核对，避免重复发起。"))) setTaskPreview(null); }}><EditorialTaskScopePreview request={taskPreview.body} quote={taskPreview.editorialScope?.selection ? taskPreview.editorialScope.quote : undefined} characters={taskPreview.editorialScope?.characters} /><JobRouteDetails route={taskPreview.route} /><TaskMaterialPreview route={taskPreview.route} onChangeMaterials={!taskUncertain ? () => { setTaskPreview(null); setEditorMaterialsOpen(true); } : undefined} />{taskUncertain && <p className="inline-error">请求结果尚不明确。先核对任务记录；此按钮沿用原幂等键核对并重试。</p>}<div className="modal-footer"><button className="button primary" disabled={!!busy || !libraryTaskConfiguration(taskPreview.route)} onClick={() => void confirmTask()}><Play size={14} />{taskUncertain ? "沿用原键核对并重试" : "确认并开始任务"}</button></div></Modal>}
-      {showSettings && <APISettings onClose={() => setShowSettings(false)} onModels={() => { if (navigate("models")) setShowSettings(false); }} onSaved={async () => { const boot = await api<Bootstrap>("/bootstrap"); setBootstrap(boot); setToken(boot.csrf_token); }} />}
+      {taskPreview && <Modal title="确认本次模型任务" subtitle="预览不会调用模型；确认后按固定文稿、模型与资料版本提交。" wide onClose={async () => { if (!busy && (!taskUncertain || await requestConfirmation("提交结果仍不明确。关闭后请先在任务记录核对，避免重复发起。"))) setTaskPreview(null); }}><EditorialTaskScopePreview request={taskPreview.body} quote={taskPreview.editorialScope?.selection ? taskPreview.editorialScope.quote : undefined} characters={taskPreview.editorialScope?.characters} /><JobRouteDetails route={taskPreview.route} /><TaskMaterialPreview route={taskPreview.route} onChangeMaterials={!taskUncertain ? () => { setTaskPreview(null); setEditorMaterialsOpen(true); } : undefined} />{taskUncertain && <p className="inline-error">请求结果尚不明确。先核对任务记录；此按钮沿用原幂等键核对并重试。</p>}<div className="modal-footer"><button className="button primary" disabled={!!busy || !libraryTaskConfiguration(taskPreview.route)} onClick={() => void confirmTask()}><Play size={14} />{taskUncertain ? "沿用原键核对并重试" : "确认并开始任务"}</button></div></Modal>}
+      {showSettings && <APISettings onClose={() => setShowSettings(false)} onModels={async () => { if (await navigate("models")) setShowSettings(false); }} onSaved={async () => { const boot = await api<Bootstrap>("/bootstrap"); setBootstrap(boot); setToken(boot.csrf_token); }} />}
       {showGuide && <UserGuide onClose={() => setShowGuide(false)} onNavigate={navigate} />}
       {exportRange && (
         <Modal
@@ -3061,6 +3076,7 @@ export default function App() {
           </form>
         </Modal>
       )}
+      <ConfirmationHost />
     </div>
     </TaskReferenceContext.Provider>
   );

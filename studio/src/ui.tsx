@@ -53,12 +53,11 @@ export function Modal({
     const previous = document.activeElement as HTMLElement | null;
     const focusables = () => [
       ...(ref.current?.querySelectorAll<HTMLElement>(
-        'button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [tabindex="0"]',
+        'a[href], button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [tabindex="0"]',
       ) || []),
-    ];
-    focusables()
-      .find((el) => el.tagName !== "BUTTON")
-      ?.focus();
+    ].filter((el) => el.getClientRects().length > 0);
+    const initial = focusables();
+    (initial.find((el) => el.tagName !== "BUTTON") || initial[0] || ref.current)?.focus();
     const key = (event: KeyboardEvent) => {
       // Nested pickers also use Modal. Let only the visible top dialog handle
       // keyboard dismissal/focus; a parent must not discard a child's edits
@@ -76,7 +75,13 @@ export function Modal({
         const elements = focusables();
         const first = elements[0];
         const last = elements.at(-1);
-        if (event.shiftKey && document.activeElement === first) {
+        if (!first) {
+          ref.current?.focus();
+          event.preventDefault();
+        } else if (!ref.current?.contains(document.activeElement)) {
+          (event.shiftKey ? last : first)?.focus();
+          event.preventDefault();
+        } else if (event.shiftKey && document.activeElement === first) {
           last?.focus();
           event.preventDefault();
         } else if (!event.shiftKey && document.activeElement === last) {
@@ -101,6 +106,7 @@ export function Modal({
       <div
         ref={ref}
         role="dialog"
+        tabIndex={-1}
         aria-modal="true"
         aria-labelledby={titleId}
         className={`modal ${wide ? "wide" : ""}`}

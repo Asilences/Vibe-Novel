@@ -24,12 +24,13 @@ function harness() {
       if (index >= 0) listeners.splice(index, 1);
     },
   };
-  function mount(name, onClose) {
-    const elements = ["INPUT", "BUTTON"].map((tagName, i) => ({
-      tagName, name: `${name}-${i}`,
+  function mount(name, onClose, tags = ["INPUT", "BUTTON"]) {
+    const elements = tags.map((tagName, i) => ({
+      tagName: tagName === "HIDDEN" ? "INPUT" : tagName, name: `${name}-${i}`,
       focus() { document.activeElement = this; },
+      getClientRects() { return tagName === "HIDDEN" ? [] : [{}]; },
     }));
-    const node = { querySelectorAll: () => elements };
+    const node = { querySelectorAll: (selector) => elements.filter((element) => element.tagName !== "A" || selector.includes("a[href]")), contains: (element) => elements.includes(element), focus() { document.activeElement = this; } };
     dialogs.push(node);
     let refCount = 0, cleanup;
     const environment = {
@@ -105,4 +106,28 @@ test("Tab and Shift+Tab wrap only within the top dialog then return to the paren
   assert.equal(h.dispatch("Tab").defaultPrevented, true);
   assert.equal(h.document.activeElement, parent.elements[0]);
   parent.unmount();
+});
+
+test("a button-only response dialog receives initial focus and traps focus that starts outside", () => {
+  const h = harness();
+  const trigger = { name: "open-response", focus() { h.document.activeElement = this; } };
+  trigger.focus();
+  const dialog = h.mount("response", () => {}, ["BUTTON"]);
+  assert.equal(h.document.activeElement, dialog.elements[0]);
+  trigger.focus();
+  assert.equal(h.dispatch("Tab").defaultPrevented, true);
+  assert.equal(h.document.activeElement, dialog.elements[0]);
+  dialog.unmount();
+  assert.equal(h.document.activeElement, trigger);
+});
+
+test("hidden controls are skipped and the guide's final link remains inside the Tab loop", () => {
+  const h = harness();
+  const dialog = h.mount("guide", () => {}, ["HIDDEN", "BUTTON", "A"]);
+  assert.equal(h.document.activeElement, dialog.elements[2]);
+  assert.equal(h.dispatch("Tab").defaultPrevented, true);
+  assert.equal(h.document.activeElement, dialog.elements[1]);
+  assert.equal(h.dispatch("Tab", { shiftKey: true }).defaultPrevented, true);
+  assert.equal(h.document.activeElement, dialog.elements[2]);
+  dialog.unmount();
 });

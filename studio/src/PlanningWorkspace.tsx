@@ -1,3 +1,4 @@
+import { requestConfirmation } from "./confirm";
 import { useTaskReference } from "./TaskReferenceContext";
 import type { TaskReference } from "./TaskReferenceContext";
 import {
@@ -604,14 +605,14 @@ export default function PlanningWorkspace({
     } catch (failure) { if (alive.current) setError(message(failure)); }
     finally { if (alive.current) setBusy(""); }
   }
-  function closeEditing() {
+  async function closeEditing() {
     if (busy === "save-package") return;
     if (
       editing &&
       editText !== editing.content &&
-      !window.confirm(
+      !(await requestConfirmation(
         "候选 JSON 有未保存的修改。关闭会放弃这些修改，仍要继续吗？",
-      )
+      ))
     )
       return;
     setEditing(null);

@@ -1,3 +1,4 @@
+import { requestConfirmation } from "./confirm";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
 import { ArrowUpRight, BookOpen, CheckCheck, CircleAlert, ClipboardList, Download, FileSearch, FileText, History, LoaderCircle, RefreshCw, Save, Search, ShieldCheck, SlidersHorizontal } from "lucide-react";
@@ -104,9 +105,9 @@ export default function AnalysisWorkspace({ project, documents, approvals, curre
   useEffect(() => { dirtyCallback.current?.(dirty); }, [dirty]);
   useEffect(() => () => dirtyCallback.current?.(false), []);
 
-  function chooseTab(next: Tab) {
+  async function chooseTab(next: Tab) {
     if (next === tab) return;
-    if (toolkitDirty && !window.confirm("检查配置尚未保存。切换工具会放弃这份修改，仍要继续吗？")) return;
+    if (toolkitDirty && !(await requestConfirmation("检查配置尚未保存。切换工具会放弃这份修改，仍要继续吗？"))) return;
     setToolkitDirty(false); setTab(next); setError(""); setNotice("");
   }
 

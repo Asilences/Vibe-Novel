@@ -18,6 +18,17 @@ from .project import utc_now
 from vibenovel.errors import VibeNovelError
 
 
+def structured_research_request_options(base_url, model):
+    """Protocol options for bounded research JSON, frozen with each preview.
+
+    This applies only to the official Flash endpoint. Compatible endpoints and
+    other model families keep their own defaults; never infer their protocol.
+    """
+    return ({"thinking": "disabled"}
+            if urlsplit(base_url).hostname == "api.deepseek.com"
+            and model.startswith("deepseek-flash") else {})
+
+
 class ResearchGateway:
     def __init__(self, workspace, provider_factory=None):
         self.workspace = Path(workspace).resolve()
@@ -106,9 +117,8 @@ class ResearchGateway:
         # explicit research JSON, and bind this protocol option to the preview.
         from vibenovel.studio.model_registry import resolve_snapshot
         settings = None if self.provider_factory else resolve_snapshot(self.workspace, snapshot)
-        options = ({"thinking": "disabled"} if settings is not None
-                   and urlsplit(settings.base_url).hostname == "api.deepseek.com"
-                   and snapshot["model"].startswith("deepseek-flash") else {})
+        options = (structured_research_request_options(settings.base_url, snapshot["model"])
+                   if settings is not None else {})
         tokens = len(prompt.encode("utf-8")) + 2048
         if max_output_tokens > snapshot["max_output_tokens"] or tokens + max_output_tokens > snapshot["context_tokens"]:
             raise VibeNovelError("研究输入或输出超过冻结模型容量，未发送")

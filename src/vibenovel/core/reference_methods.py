@@ -30,7 +30,7 @@ def check_frozen_research_plan(batch):
     """Shared projection of immutable plan fields, excluding durable progress."""
     fields = ("schema_version", "book_id", "edition_id", "novel_id", "request", "chapter_ids", "nodes",
               "authorization_revision", "coverage", "budget", "warnings")
-    mutable = {"attempt_id", "budget_summary", "result_path", "result_hash", "result_summary", "pending_response", "finish_reason"}
+    mutable = {"attempt_id", "budget_summary", "result_path", "result_hash", "result_summary", "pending_response", "finish_reason", "response_repair"}
     try:
         projected = {name: copy.deepcopy(batch[name]) for name in fields}
         for node in projected["nodes"]:

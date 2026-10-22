@@ -4,6 +4,7 @@ import { CircleAlert, KeyRound, LoaderCircle, RefreshCw, Save, ShieldCheck } fro
 import { api, ApiError } from "./api";
 import type { APISettingsData } from "./api";
 import { Modal } from "./ui";
+import { requestConfirmation } from "./confirm";
 
 export default function APISettings({ onClose, onSaved, onModels }: { onClose: () => void; onSaved: () => Promise<void>; onModels: () => void }) {
   const [settings, setSettings] = useState<APISettingsData | null>(null);
@@ -50,6 +51,27 @@ export default function APISettings({ onClose, onSaved, onModels }: { onClose: (
   const selectedPreset = settings?.presets.find((item) => item.id === preset);
   const endpointNeedsKey = !!settings?.api.has_api_key && baseUrl.trim() !== settings.api.base_url && !secret.trim() && !clearKey;
   const busy = saving || reloading;
+  const priceChanged = (input: string, saved: number | null | undefined) =>
+    (input.trim() === "" ? null : Number(input)) !== (saved ?? null);
+  const dirty = !!settings && !multiModelActive && (
+    baseUrl.trim() !== settings.api.base_url || model.trim() !== settings.api.model ||
+    priceChanged(inputPrice, settings.api.price_input_usd) || priceChanged(outputPrice, settings.api.price_output_usd) ||
+    !!secret || clearKey || allowLoopback !== settings.api.allow_loopback
+  );
+  const formIdentity = JSON.stringify([settings?.hash, multiModelActive, baseUrl, model, inputPrice, outputPrice, secret, clearKey, allowLoopback]);
+  const formIdentityRef = useRef(formIdentity); formIdentityRef.current = formIdentity;
+  useEffect(() => {
+    if (!dirty) return;
+    const beforeUnload = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ""; };
+    window.addEventListener("beforeunload", beforeUnload);
+    return () => window.removeEventListener("beforeunload", beforeUnload);
+  }, [dirty]);
+  async function close() {
+    if (busy) return;
+    const expected = formIdentityRef.current;
+    if (dirty && !await requestConfirmation("模型与 API 设置有未保存的修改，确认放弃并关闭？")) return;
+    if (alive.current && formIdentityRef.current === expected) onClose();
+  }
   function clearPrices() {
     setInputPrice(""); setOutputPrice(""); setNotice("");
   }
@@ -111,7 +133,7 @@ export default function APISettings({ onClose, onSaved, onModels }: { onClose: (
           : "设置未保存。请检查接口地址、模型、价格和密钥；外部接口需使用 HTTPS，本机接口需勾选允许本机回环地址。");
     } finally { if (alive.current) setSaving(false); }
   }
-  return <Modal title="模型与 API 设置" subtitle="生成任务统一通过 API 执行。配置保存在本机，不会自动测试连通性。" onClose={onClose}>
+  return <Modal title="模型与 API 设置" subtitle="生成任务统一通过 API 执行。配置保存在本机，不会自动测试连通性。" onClose={close}>
     {loading ? <div className="analysis-loading"><LoaderCircle size={20} className="spin" />读取配置状态…</div> : multiModelActive ? <div className="modal-form api-settings"><div className="analysis-warning"><ShieldCheck size={16} /><span>本机已启用多模型注册表。当前任务使用“多模型协作”中保存的模型和作品角色绑定，请在那里修改密钥与模型配置。</span></div><p className="form-note">原单 API 配置保留供回顾；修改它不会更新当前任务路线。</p><div className="modal-footer"><button type="button" className="button secondary" onClick={onClose}>关闭</button><button type="button" className="button primary" onClick={onModels}>打开多模型协作</button></div></div> : settings ? <form className="modal-form api-settings" onSubmit={(event) => void save(event)}>
       <div className="api-key-status"><KeyRound size={16} /><strong>{settings.api.has_api_key ? "已配置密钥" : "尚未配置密钥"}</strong><span>已保存的密钥不会回显</span></div>
       <label>服务商<select value={preset} disabled={busy} onChange={(event) => {
@@ -140,7 +162,7 @@ export default function APISettings({ onClose, onSaved, onModels }: { onClose: (
       </div>}
       {notice && <p className="analysis-success" role="status">{notice}</p>}
       {error && <p className="inline-error" role="alert">{error}</p>}
-      <div className="modal-footer"><button type="button" className="button secondary" disabled={busy} onClick={() => void reload()}><RefreshCw size={15} className={reloading ? "spin" : ""} />重新读取配置</button><button type="button" className="button secondary" onClick={onClose}>关闭</button><button type="submit" className="button primary" disabled={busy || !!latestSettings || endpointNeedsKey || !baseUrl.trim() || !model.trim()}>{saving ? <LoaderCircle size={15} className="spin" /> : <Save size={15} />}保存配置</button></div>
+      <div className="modal-footer"><button type="button" className="button secondary" disabled={busy} onClick={() => void reload()}><RefreshCw size={15} className={reloading ? "spin" : ""} />重新读取配置</button><button type="button" className="button secondary" disabled={busy} onClick={close}>关闭</button><button type="submit" className="button primary" disabled={busy || !!latestSettings || endpointNeedsKey || !baseUrl.trim() || !model.trim()}>{saving ? <LoaderCircle size={15} className="spin" /> : <Save size={15} />}保存配置</button></div>
     </form> : <><p className="inline-error" role="alert">{error}</p><button type="button" className="button secondary" disabled={reloading} onClick={() => void reload()}><RefreshCw size={15} className={reloading ? "spin" : ""} />重新读取配置</button></>}
   </Modal>;
 }

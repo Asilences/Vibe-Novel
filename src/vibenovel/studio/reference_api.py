@@ -52,6 +52,12 @@ class MethodPreview(ReferenceInput):
     method_indices: list[StrictInt] = Field(min_length=1, max_length=6)
 
 
+class BatchResponseRepair(ReferenceInput):
+    expected_hash: StrictStr = Field(min_length=64, max_length=64)
+    text: StrictStr = Field(min_length=1, max_length=1024 * 1024)
+    reason: StrictStr = Field(min_length=1, max_length=2000)
+
+
 class MethodPublish(MethodPreview):
     expected_preview: StrictStr = Field(min_length=64, max_length=64)
     idempotency_key: StrictStr = Field(min_length=16, max_length=80)
@@ -122,6 +128,14 @@ def install_reference_routes(app: FastAPI, workspace, projects, jobs):
     @app.get("/api/reference-books/{book_id}/batches/{batch_id}/nodes/{node_id}")
     def read_node(book_id: str, batch_id: str, node_id: str):
         return batches.get_node(book_id, batch_id, node_id)
+
+    @app.get("/api/reference-books/{book_id}/batches/{batch_id}/nodes/{node_id}/response")
+    def read_response(book_id: str, batch_id: str, node_id: str):
+        return batches.response(book_id, batch_id, node_id)
+
+    @app.put("/api/reference-books/{book_id}/batches/{batch_id}/nodes/{node_id}/response")
+    def repair_response(book_id: str, batch_id: str, node_id: str, body: BatchResponseRepair):
+        return batches.repair_response(book_id, batch_id, node_id, body.expected_hash, body.text, body.reason)
 
     @app.post("/api/reference-books/{book_id}/batches/{batch_id}/nodes/{node_id}/methods/preview")
     def preview_methods(book_id: str, batch_id: str, node_id: str, body: MethodPreview):

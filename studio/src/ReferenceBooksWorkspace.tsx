@@ -1,3 +1,4 @@
+import { requestConfirmation } from "./confirm";
 import { useEffect, useRef, useState } from "react";
 import { ArrowLeft, ArrowRight, BookOpen, Check, CircleAlert, FileText, Layers3, LoaderCircle, Pause, Play, RefreshCw, Search, Settings2, ShieldCheck, Sparkles, Square, Upload } from "lucide-react";
 import { api, ApiError, formatDate } from "./api";
@@ -66,6 +67,7 @@ export default function ReferenceBooksWorkspace({ projects, onSettings, onDirtyC
   const [nodeResult, setNodeResult] = useState<{batchId: string; nodeId: string; result: unknown} | null>(null);
   const [methodContext, setMethodContext] = useState<{bookId: string; editionId: string; batchId: string; nodeId: string; result: unknown} | null>(null);
   const [methodDirty, setMethodDirty] = useState(false);
+  const [repair, setRepair] = useState<{bookId: string; batchId: string; nodeId: string; hash: string; text: string; original: string; repairable: boolean; reason: string} | null>(null);
   const [editionBook, setEditionBook] = useState<string | null>(null), [editionDirty, setEditionDirty] = useState(false), [editionBusy, setEditionBusy] = useState(false);
   const [verify, setVerify] = useState<RecordData | null>(null), [busy, setBusy] = useState("");
   const [error, setError] = useState(""), [notice, setNotice] = useState("");
@@ -73,7 +75,8 @@ export default function ReferenceBooksWorkspace({ projects, onSettings, onDirtyC
   const dirtyCallback = useRef(onDirtyChange); dirtyCallback.current = onDirtyChange;
   const policyDirty = !!book && (outbound !== (book.outbound || "local") || withdrawn !== !!book.withdrawn);
   const importDirty = importOpen && (!!importFile || !!title || !!author);
-  const dirty = policyDirty || importDirty || methodDirty || editionDirty;
+  const repairDirty = !!repair && (repair.text !== repair.original || !!repair.reason.trim());
+  const dirty = policyDirty || importDirty || methodDirty || editionDirty || repairDirty;
   const identity = JSON.stringify([book?.book_id, book?.hash, allSelected, selected, billingId, purpose, budget, outputLimit]);
   const identityRef = useRef(identity); identityRef.current = identity;
   const currentChapters = book?.chapters || [], totalChapters = book?.total_chapters ?? book?.counts.chapters ?? 0;
@@ -120,15 +123,16 @@ export default function ReferenceBooksWorkspace({ projects, onSettings, onDirtyC
     finally { gate.current = false; if (mounted.current) setBusy(""); }
   }
   async function reloadBooks() { const result = await api<{ books: Book[] }>(base); if (mounted.current) setBooks(result.books); }
-  async function openBook(id: string, offset = 0, switchBook = false) {
-    if (switchBook && dirty && !window.confirm("本页有未保存的设置或方法选择，确认放弃修改并打开另一本书？")) return;
+  async function openBook(id: string, offset = 0, switchBook = false, importSaved = false) {
+    const hasPending = importSaved ? policyDirty || methodDirty || editionDirty || repairDirty : dirty;
+    if (switchBook && hasPending && !(await requestConfirmation("本页有未保存的设置或方法选择，确认放弃修改并打开另一本书？"))) return;
     const switching = switchBook || selectedId.current !== id;
     if (switching) { bookEpoch.current += 1; textEpoch.current += 1; selectedId.current = id; }
     const epoch = bookEpoch.current, directoryRequest = ++directoryEpoch.current;
     const value = await api<Book>(`${bookUrl(id)}?offset=${offset}&limit=${CHAPTER_PAGE}`);
     if (!valid(epoch, id) || directoryRequest !== directoryEpoch.current) return;
     setBook(value); setDirectoryOffset(offset); setVerify(null);
-    if (switchBook) { setMethodContext(null); setMethodDirty(false); setTab("read"); setChapter(null); setChapterText(null); setOutbound(value.outbound || "local"); setWithdrawn(!!value.withdrawn); setSelected([]); setAllSelected(false); setSearch(null); setQuery(""); setPreview(null); setUncertain(false); setBatch(null); setBatches([]); setNodeResult(null); setPreviewOffset(0); setBatchOffset(0); }
+    if (switchBook) { setRepair(null); setMethodContext(null); setMethodDirty(false); setTab("read"); setChapter(null); setChapterText(null); setOutbound(value.outbound || "local"); setWithdrawn(!!value.withdrawn); setSelected([]); setAllSelected(false); setSearch(null); setQuery(""); setPreview(null); setUncertain(false); setBatch(null); setBatches([]); setNodeResult(null); setPreviewOffset(0); setBatchOffset(0); }
   }
   async function openChapter(item: Chapter, offset = 0, editionId = book?.edition_id) {
     if (!book) return;
@@ -143,7 +147,7 @@ export default function ReferenceBooksWorkspace({ projects, onSettings, onDirtyC
     const value = await api<Book>(`${base}/import`, "POST", { filename: importFile.name, content_base64: bytesBase64(await importFile.arrayBuffer()), ...(title.trim() ? { title: title.trim() } : {}), ...(author.trim() ? { author: author.trim() } : {}), ...(encoding === "auto" ? {} : { encoding }) });
     if (!mounted.current) return;
     setImportOpen(false); setImportFile(null); setTitle(""); setAuthor(""); setEncoding("auto");
-    await reloadBooks(); await openBook(value.book_id, 0, true);
+    await reloadBooks(); await openBook(value.book_id, 0, true, true);
     if (mounted.current) setNotice("原件已保存并建立目录与技术分册。未调用模型；请先核对异常和正文范围。");
   }
   async function savePolicy() {
@@ -201,13 +205,35 @@ export default function ReferenceBooksWorkspace({ projects, onSettings, onDirtyC
     const result = await api<RecordData>(bookUrl(id, `/batches/${encodeURIComponent(batchId)}/nodes/${encodeURIComponent(node.id)}`));
     if (valid(epoch, id) && currentBatchRef.current === batchId) setNodeResult({batchId, nodeId: node.id, result: result.result ?? result});
   }
+  async function openRepair(nodeId: string) {
+    if (!book || !batch) return;
+    const id = book.book_id, epoch = bookEpoch.current, batchId = batch.id;
+    const result = await api<{hash: string; text: string; repairable: boolean}>(bookUrl(id, `/batches/${encodeURIComponent(batchId)}/nodes/${encodeURIComponent(nodeId)}/response`));
+    if (valid(epoch, id) && currentBatchRef.current === batchId) setRepair({bookId: id, batchId, nodeId, hash: result.hash, text: result.text, original: result.text, repairable: result.repairable, reason: ""});
+  }
+  async function closeRepair() {
+    if (busy) return;
+    if (!repairDirty || await requestConfirmation("响应修复尚未保存，确认放弃？")) setRepair(null);
+  }
+  async function saveRepair() {
+    if (!repair || !book || !batch || !repair.repairable) return;
+    const current = repair, epoch = bookEpoch.current;
+    batchMutation.current += 1;
+    const result = await api<Batch>(bookUrl(current.bookId, `/batches/${encodeURIComponent(current.batchId)}/nodes/${encodeURIComponent(current.nodeId)}/response`), "PUT", {expected_hash: current.hash, text: current.text, reason: current.reason});
+    if (valid(epoch, current.bookId) && currentBatchRef.current === current.batchId) {
+      batchMutation.current += 1; setBatch(result); setBatchOffset(0); setNodeResult(null);
+      setBatches((items) => items.map((item) => item.id === result.id ? result : item)); setRepair(null);
+      setNotice("响应已离线修复，没有新增付费请求；原响应与费用保留，后续节点仍需明确启动。");
+    }
+  }
   function renderNodeResult(node: BatchNode) {
     if (!batch || !book) return null;
+    if (node.state === "failed") return <><p className="rb-muted">失败记录与已发生费用保留。完整停止且费用已知的响应可离线修复；截断或费用不明不能补成成功研究。</p><button className="button secondary small" disabled={!!busy} onClick={() => void action("response", () => openRepair(node.id))}><FileText size={13} />查看原响应与离线修复（不收费）</button></>;
     const result = nodeResult?.batchId === batch.id && nodeResult.nodeId === node.id ? nodeResult.result : node.result;
     if (result != null) return <><ResultContent value={result} onEvidence={inspectEvidence} />{nodeDone(node.state) && (researchMethods(result).length ? <button className="button secondary small" disabled={!!busy} onClick={() => setMethodContext({bookId: book.book_id, editionId: typeof batch.edition_id === "string" ? batch.edition_id : book.edition_id, batchId: batch.id, nodeId: node.id, result})}><Sparkles size={13} />整理为个人方法候选（{researchMethods(result).length}）</button> : <p className="rb-muted">此节点没有方法候选；可以保留分析观察，不能凭空转为方法卡。</p>)}</>;
     return node.result_path || nodeDone(node.state) ? <button className="button secondary small" disabled={!!busy} onClick={() => void action("node-result", () => readNode(node))}><FileText size={13} />查看完整候选分析</button> : <p className="rb-muted">该节点尚无已保存的分析结果。</p>;
   }
-  function closeEditions() { if (editionBusy) return; if (!editionDirty || window.confirm("目录或补丁尚未保存，确认关闭并放弃修改？")) {setEditionBook(null); setEditionDirty(false);} }
+  async function closeEditions() { if (editionBusy) return; if (!editionDirty || (await requestConfirmation("目录或补丁尚未保存，确认关闭并放弃修改？"))) {setEditionBook(null); setEditionDirty(false);} }
   function editionPublished() {
     const id = editionBook;
     if (!id) return;
@@ -216,7 +242,7 @@ export default function ReferenceBooksWorkspace({ projects, onSettings, onDirtyC
       if (selectedId.current === id) { textEpoch.current += 1; setChapter(null); setChapterText(null); setSelected([]); setAllSelected(false); setSearch(null); setPreview(null); setUncertain(false); await openBook(id, 0); }
     });
   }
-  function closeImport() { if (!busy && (!importDirty || window.confirm("本次导入尚未保存，确认关闭并放弃填写？"))) { setImportOpen(false); setImportFile(null); setTitle(""); setAuthor(""); } }
+  async function closeImport() { if (!busy && (!importDirty || (await requestConfirmation("本次导入尚未保存，确认关闭并放弃填写？")))) { setImportOpen(false); setImportFile(null); setTitle(""); setAuthor(""); } }
 
   return <section className="reference-books" aria-label="参考书架">
     <div className="rb-heading"><div><span className="rb-eyebrow"><BookOpen size={15} /> 让整本书成为可回查的参考</span><h2>参考书架 <span>{books.length}</span></h2><p>保留原文，逐章理解内容安排，再连接方法与表达。导入与阅读均在本机完成。</p></div><div className="rb-actions"><button className="button secondary small" disabled={!!busy || policyDirty} onClick={() => void action("refresh", async () => { await reloadBooks(); if (book) await openBook(book.book_id, directoryOffset); })} aria-label="刷新参考书架"><RefreshCw size={14} /></button><button className="button primary small" disabled={!!busy} onClick={() => setImportOpen(true)}><Upload size={14} />导入参考书</button></div></div>
@@ -252,6 +278,7 @@ export default function ReferenceBooksWorkspace({ projects, onSettings, onDirtyC
         </section>}
       </article> : books.length > 0 && <div className="rb-welcome"><BookOpen size={38} /><h3>选一本书，先从原文与目录开始</h3><p>原文、结构、方法与表达相互连接。当前可本地阅读、核对、检索，再预览并启动逐章研究。</p></div>}
     </div>
+    {repair && <Modal title="离线修复逐章研究响应" subtitle="原响应只读保留；修复另存版本并严格核对实发范围，不重发 API，不代表作者采用。" wide onClose={closeRepair}><details><summary>只读原始响应</summary><pre className="rb-report-text">{repair.original}</pre></details>{!repair.repairable && <p className="rb-alert">该响应未完整停止、原 JSON 不完整或费用不明，只能回查，不能补成成功研究。</p>}<label>修复候选 JSON<textarea rows={18} value={repair.text} readOnly={!repair.repairable} disabled={!!busy} onChange={(event) => setRepair({...repair, text: event.target.value})} /></label><label>修复说明<input value={repair.reason} maxLength={2000} disabled={!!busy || !repair.repairable} onChange={(event) => setRepair({...repair, reason: event.target.value})} /></label><p className="rb-muted">只能采用实际发送区间内可逐字回查的引文；错误或多义引文须人工核对。原费用与调用次数不变。</p><div className="modal-footer"><button className="button secondary" disabled={!!busy} onClick={() => void closeRepair()}>关闭</button><button className="button primary" disabled={!!busy || !repair.repairable || !repair.reason.trim()} onClick={() => void action("repair", saveRepair)}>校验证据并保存修复候选</button></div></Modal>}
     {editionBook && <Modal title="目录与修订" subtitle="新整理版保留原件、旧版本与精确映射，先审阅再发布。" wide onClose={closeEditions}><ReferenceEditionsWorkspace bookId={editionBook} onClose={closeEditions} onPublished={editionPublished} onDirtyChange={setEditionDirty} onBusyChange={setEditionBusy} /></Modal>}
     {methodContext && <MethodSelectionModal context={methodContext} onDirtyChange={setMethodDirty} onClose={() => { setMethodContext(null); setMethodDirty(false); }} onOpenMethods={onOpenMethods} />}
     {importOpen && <Modal title="导入一本参考书" subtitle="原始文件留在私人书库，规范文本与技术分册另存；不会创建作者小说或调用模型。" wide onClose={closeImport}><form className="rb-import" onSubmit={(event) => { event.preventDefault(); void action("import", importBook); }}><label>本机 EPUB / TXT / MD 文件<input type="file" required accept=".epub,.txt,.md,application/epub+zip,text/plain,text/markdown" disabled={!!busy} onChange={(event) => { const file = event.target.files?.[0] || null; setImportFile(file); if (file && !title) setTitle(file.name.replace(/\.[^.]+$/, "")); }} /></label><div className="rb-grid"><label>书名<input value={title} maxLength={500} disabled={!!busy} onChange={(event) => setTitle(event.target.value)} placeholder="可留空，使用文件或书目标题" /></label><label>作者<input value={author} maxLength={500} disabled={!!busy} onChange={(event) => setAuthor(event.target.value)} placeholder="未知时留空，之后核对" /></label></div><label>TXT / MD 编码<select value={encoding} disabled={!!busy} onChange={(event) => setEncoding(event.target.value)}><option value="auto">自动识别；异常保留为缺口</option><option value="utf-8">UTF-8</option><option value="gb18030">GB18030 / GBK</option><option value="utf-16">UTF-16</option></select></label><p className="rb-muted">单原件最多128 MiB。重复候选和编码问题会列出，不自动删除原文。大文件优先按自然章节建立技术分册；技术分册与原书卷分别记录。</p><p className="rb-muted">私人书库默认不进 Git，请随工作区完整备份。导入材料中的命令只作为原文保留。</p><div className="modal-footer"><button type="button" className="button secondary" disabled={!!busy} onClick={closeImport}>取消</button><button className="button primary" disabled={!!busy || !importFile}>{busy === "import" ? <LoaderCircle className="spin" size={14} /> : <Upload size={14} />}{busy === "import" ? "正在归档与解析…" : "保留原件并建立目录"}</button></div></form></Modal>}
@@ -300,7 +327,7 @@ function MethodSelectionModal({ context, onClose, onDirtyChange, onOpenMethods }
     } catch (failure) { if (alive.current) setError(message(failure)); }
     finally { gate.current = false; if (alive.current) setBusy(false); }
   }
-  function close() { if (busy || uncertain) return; if (!dirty || window.confirm("方法选择尚未保存，确认关闭并放弃本次整理？")) onClose(); }
+  async function close() { if (busy || uncertain) return; if (!dirty || (await requestConfirmation("方法选择尚未保存，确认关闭并放弃本次整理？"))) onClose(); }
   return <Modal title="整理为个人方法候选" subtitle="仅复用已完成研究，不调用模型，也不自动采用或选入作品。" wide onClose={close}><section className="rb-method-transfer">
     <p className="rb-muted">选择值得继续核对的方法，先查看保存内容。原书依据与研究节点将固定保留；方法有效性仍需作者判断与试用。</p>
     {error && <p className="rb-alert error" role="alert">{error}</p>}
@@ -316,7 +343,7 @@ function MethodSelectionModal({ context, onClose, onDirtyChange, onOpenMethods }
 
 function ModelRoute({ value }: { value?: RecordData }) {
   const route = object(value), candidates = Array.isArray(route.candidates) ? route.candidates.map(object) : [];
-  return <dl className="rb-report">{candidates.map((item, index) => <div key={index}><dt>{index ? "允许备用" : "主模型"}</dt><dd>{String(item.label || item.model || "未配置")} · {String(item.model || "")}</dd></div>)}<div><dt>输入Token估算</dt><dd>{typeof route.estimated_input_tokens === "number" ? route.estimated_input_tokens.toLocaleString() : "预览未提供"}</dd></div><div><dt>预算预留输出Token上限</dt><dd>{typeof route.max_output_tokens === "number" ? route.max_output_tokens.toLocaleString() : "预览未提供"}</dd></div></dl>;
+  return <dl className="rb-report">{candidates.map((item, index) => <div key={index}><dt>{index ? "允许备用" : "主模型"}</dt><dd>{String(item.label || item.model || "未配置")} · {String(item.model || "")}</dd></div>)}{object(route.request_options).thinking === "disabled" && <div><dt>结构化研究</dt><dd>关闭模型思考，输出额度用于候选 JSON</dd></div>}<div><dt>输入Token估算</dt><dd>{typeof route.estimated_input_tokens === "number" ? route.estimated_input_tokens.toLocaleString() : "预览未提供"}</dd></div><div><dt>预算预留输出Token上限</dt><dd>{typeof route.max_output_tokens === "number" ? route.max_output_tokens.toLocaleString() : "预览未提供"}</dd></div></dl>;
 }
 
 function NodePagination({offset, total, onChange, disabled = false}: {offset: number; total: number; disabled?: boolean; onChange: (offset: number) => void}) {
