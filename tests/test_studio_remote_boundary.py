@@ -31,7 +31,7 @@ class StudioRemoteBoundaryUnitTests(unittest.TestCase):
     def test_pbkdf2_credentials_and_file_permissions(self):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "studio.htpasswd"
-            salt = b"fixed-test-salt"
+            salt = b"fixed-test-salt!"
             digest = hashlib.pbkdf2_hmac("sha256", b"secret", salt, 100_000)
             encoded = "pbkdf2-sha256$100000$%s$%s" % (
                 base64.b64encode(salt).decode(), base64.b64encode(digest).decode())
@@ -59,7 +59,7 @@ class StudioCampusBoundaryHTTPTests(unittest.TestCase):
             root = Path(temporary)
             ProjectStore(root).init("story", genre="general", title="测试")
             auth = root / "auth"
-            salt = b"fixed-test-salt"
+            salt = b"fixed-test-salt!"
             digest = hashlib.pbkdf2_hmac("sha256", b"secret", salt, 100_000)
             auth.write_text("author:pbkdf2-sha256$100000$%s$%s\n" % (
                 base64.b64encode(salt).decode(), base64.b64encode(digest).decode()), encoding="utf-8")

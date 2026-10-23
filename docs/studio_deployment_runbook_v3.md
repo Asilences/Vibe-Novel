@@ -154,3 +154,23 @@ SSH连接不受本机浏览器关闭影响。服务器重启后的可用性仍�
 - 未记录监听、防火墙、代理、证书、备份和费用证据时，停止对外宣布“已部署”。
 
 任何阶段失败都回退到已验证的SSH隧道，不关闭现有回环校验，不清除历史账本，不重放未确定结果的模型请求。
+
+## 8. 已实现的校园模式命令（尚未在正式服务器启用）
+
+源码现在提供显式的`campus`边界，但远端正式服务仍保持`127.0.0.1:8000`。需要创建凭据时，在受保护目录执行：
+
+```bash
+python tools/studio_auth.py --file /secure/vibenovel/studio.auth --username author
+chmod 600 /secure/vibenovel/studio.auth
+```
+
+受控内网测试时，绑定明确校园网网卡地址并列出实际浏览器 Host：
+
+```bash
+vibenovel-studio --workspace <作品工作区> --frontend <studio/dist绝对路径> \
+  --host <校园网服务器IP> --port 8000 --access-mode campus \
+  --allowed-host <校园网服务器IP>:8000 \
+  --basic-auth-file /secure/vibenovel/studio.auth
+```
+
+该模式拒绝`0.0.0.0`、`::`和回环绑定，要求每个请求携带Basic Auth，并保留写请求令牌。当前不信任`X-Forwarded-*`，所以不能把它直接放在TLS反代后宣称完成HTTPS；正式入口仍须完成可信代理/外部Origin、登录会话、角色权限、TLS和CIDR防火墙验收。网络管理员确认前不要修改远端服务参数。

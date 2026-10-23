@@ -167,7 +167,26 @@ Remove-Item Env:VIBENOVEL_API_KEY
 
 这些检查无需 API，产物只进入报告与本地分析配置。统计与命中都是编辑线索，不代表文学质量或一致性结论。设计吸收了 [dsh-novel-writer](https://github.com/siweina/dsh-novel-writer) 的有用思路，本轮以 VibeNovel 原生核心实现，未引入其 MCP 写工具、Node 运行依赖或模型资产。详见[集成设计与验收](docs/writing_analysis_v3.md)。
 
-服务只监听本机，限制 Host/Origin、变更请求令牌和文档路径；这是单用户本地工作流，不是对同权限本机进程的人类身份认证或安全沙箱。不要将服务反向代理到公网。开发时 `npm run dev` 代理 `/api` 到 8000，使用同一台电脑访问；正式使用推荐前后端同源构建模式。
+服务默认只监听本机，限制 Host/Origin、变更请求令牌和文档路径；这是单用户本地工作流，不是对同权限本机进程的人类身份认证或安全沙箱。需要校园网访问时，必须显式启用 `campus` 模式、配置精确 Host 白名单和 PBKDF2 Basic Auth；该模式目前不信任 `X-Forwarded-*`，也不替代 HTTPS、反向代理和校园网防火墙。不要把默认本地模式直接反向代理到公网。开发时 `npm run dev` 代理 `/api` 到 8000，使用同一台电脑访问；正式使用推荐前后端同源构建模式。远程部署边界和验收顺序见 [校园网与公网部署设计](docs/studio_deployment_design_v3.md)。
+
+### 校园网模式（仅在网络边界和 HTTPS 已验收后启用）
+
+先生成只允许所有者读取的凭据文件；密码不会出现在命令行、配置或日志中：
+
+```bash
+python tools/studio_auth.py --file /secure/vibenovel/studio.auth --username author
+```
+
+启动时必须绑定明确的校园网网卡地址，并列出浏览器实际使用的 Host。不要使用 `0.0.0.0`、`::` 或只配置其中一项：
+
+```bash
+vibenovel-studio --workspace <作品工作区> --frontend <studio/dist绝对路径> \
+  --host <校园网服务器IP> --port 8000 --access-mode campus \
+  --allowed-host <校园网服务器IP>:8000 \
+  --basic-auth-file /secure/vibenovel/studio.auth
+```
+
+campus 模式对每个请求要求 Basic Auth，并继续要求写请求的 `X-VibeNovel-Token` 和 JSON；Host 不在白名单时直接拒绝。当前实现不信任转发头，因此 Caddy/Nginx 终止 HTTPS 时还需按部署设计完成可信代理/外部 Origin 方案，不能把此命令直接作为公网服务。未完成登录、TLS、CIDR 防火墙、隔离工作区和备份验收前，继续使用 SSH 隧道入口。
 
 ## 快速使用
 
