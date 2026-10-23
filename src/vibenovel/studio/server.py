@@ -8,7 +8,10 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
+import hashlib
 import hmac
+import ipaddress
+import os
 import secrets
 import tempfile
 from contextlib import asynccontextmanager
@@ -57,6 +60,125 @@ from vibenovel.core.research_gateway import ResearchGateway
 
 MAX_REQUEST_BYTES = 15 * 1024 * 1024
 LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+
+
+def _parse_host(value: str):
+    """Return a normalized ``(hostname, port)`` pair for a Host value.
+
+    Host headers and command line allow-list entries are deliberately parsed
+    with the URL parser rather than string-prefix checks.  A missing port is
+    represented as ``None`` and means "any valid port" in an allow-list
+    entry.  Userinfo, paths, queries, fragments and port zero are rejected.
+    """
+    if not isinstance(value, str) or not value or any(char.isspace() for char in value):
+        return None
+    try:
+        candidate = value
+        # A command-line bind address may be a bare IPv6 literal; Host
+        # headers themselves use brackets and therefore do not need this.
+        if candidate.count(":") >= 2 and not candidate.startswith("["):
+            candidate = "[" + candidate + "]"
+        parsed = urlsplit("//" + candidate)
+        hostname = parsed.hostname
+        port = parsed.port
+    except ValueError:
+        return None
+    if (not hostname or parsed.username is not None or parsed.password is not None
+            or parsed.path or parsed.query or parsed.fragment or port == 0):
+        return None
+    # ``urlsplit`` accepts a few malformed forms (for example ``foo:bar``)
+    # as a path.  Host names are intentionally conservative here; IP literals
+    # and DNS labels are enough for a campus allow-list.
+    hostname = hostname.rstrip(".").lower()
+    if not hostname or any(char in hostname for char in "/\\@"):
+        return None
+    try:
+        ipaddress.ip_address(hostname)
+    except ValueError:
+        if len(hostname) > 253 or hostname.startswith(".") or hostname.endswith("."):
+            return None
+        labels = hostname.split(".")
+        if any(not label or len(label) > 63 or label.startswith("-") or label.endswith("-")
+               or any(not (char.isalnum() or char == "-") for char in label) for label in labels):
+            return None
+    return hostname, port
+
+
+def _is_loopback_host(hostname: str) -> bool:
+    normalized = hostname.rstrip(".").lower()
+    if normalized in LOOPBACK_HOSTS:
+        return True
+    try:
+        return ipaddress.ip_address(normalized).is_loopback
+    except ValueError:
+        return False
+
+
+def _is_wildcard_bind_host(hostname: str) -> bool:
+    normalized = hostname.rstrip(".").lower()
+    return normalized in {"", "0.0.0.0", "::", "[::]", "*"}
+
+
+class BasicAuthStore:
+    """Small, dependency-free Basic Auth credential store.
+
+    Each non-empty, non-comment line is ``username:hash``.  Hashes use the
+    format ``pbkdf2-sha256$iterations$salt-base64$digest-base64``.  Plaintext
+    and unsalted hashes are intentionally rejected.  The CLI helper emits
+    PBKDF2 and production deployments should keep this file mode 0600.
+    Credentials are loaded once at startup so a rotation takes an explicit
+    service restart.
+    """
+
+    def __init__(self, path: Path):
+        self.path = Path(path).expanduser().resolve(strict=True)
+        if not self.path.is_file():
+            raise ValueError("Basic Auth 文件必须是普通文件")
+        if os.name != "nt" and self.path.stat().st_mode & 0o077:
+            raise ValueError("Basic Auth 文件权限过宽，请设为仅所有者可读（chmod 600）")
+        entries = {}
+        try:
+            lines = self.path.read_text(encoding="utf-8").splitlines()
+        except (OSError, UnicodeError) as exc:
+            raise ValueError("无法读取 Basic Auth 文件") from exc
+        for line_number, line in enumerate(lines, 1):
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if ":" not in line:
+                raise ValueError(f"Basic Auth 文件第 {line_number} 行格式无效")
+            username, encoded = line.split(":", 1)
+            if not username or len(username) > 128 or ":" in username:
+                raise ValueError(f"Basic Auth 文件第 {line_number} 行用户名无效")
+            if username in entries or not encoded:
+                raise ValueError(f"Basic Auth 文件第 {line_number} 行重复或凭据为空")
+            entries[username] = encoded
+        if not entries:
+            raise ValueError("Basic Auth 文件至少需要一个账号")
+        self.entries = entries
+
+    @staticmethod
+    def _verify_password(password: str, encoded: str) -> bool:
+        if not encoded.startswith("pbkdf2-sha256$"):
+            return False
+        try:
+            _, raw_iterations, raw_salt, raw_digest = encoded.split("$", 3)
+            iterations = int(raw_iterations)
+            if not 100_000 <= iterations <= 1_000_000:
+                return False
+            salt = base64.b64decode(raw_salt.encode("ascii"), validate=True)
+            expected = base64.b64decode(raw_digest.encode("ascii"), validate=True)
+            if len(salt) < 16 or len(expected) != 32:
+                return False
+        except (ValueError, UnicodeError, binascii.Error):
+            return False
+        actual = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations,
+                                     dklen=len(expected))
+        return hmac.compare_digest(actual, expected)
+
+    def verify(self, username: str, password: str) -> bool:
+        encoded = self.entries.get(username)
+        return bool(encoded is not None and self._verify_password(password, encoded))
 
 
 class Input(BaseModel):
@@ -289,30 +411,75 @@ class ExportRequest(Input):
 
 
 class LocalBoundary:
-    """Reject foreign browser origins and bound even chunked request bodies."""
+    """Reject foreign browser origins and bound even chunked request bodies.
 
-    def __init__(self, app, *, token: str):
+    ``local`` keeps the historical loopback-only boundary.  ``campus`` is an
+    explicit opt-in for a directly reachable campus address: it requires an
+    exact Host allow-list and HTTP Basic Auth on every request.  This class
+    does not trust X-Forwarded-* headers; a TLS reverse proxy must either pass
+    the original scheme through a trusted ASGI deployment or use an end-to-end
+    configuration that preserves the origin check.
+    """
+
+    def __init__(self, app, *, token: str, access_mode: str = "local",
+                 allowed_hosts=None, basic_auth_file: Optional[Path] = None):
         self.app = app
         self.token = token
+        if access_mode not in {"local", "campus"}:
+            raise ValueError("访问模式只能是 local 或 campus")
+        self.access_mode = access_mode
+        raw_allowed = list(allowed_hosts or [])
+        if access_mode == "local" and (raw_allowed or basic_auth_file is not None):
+            raise ValueError("local 模式不能配置校园网 Host 或 Basic Auth")
+        if access_mode == "campus" and not raw_allowed:
+            raise ValueError("campus 模式必须明确提供至少一个 --allowed-host")
+        normalized_allowed = []
+        for value in raw_allowed:
+            parsed = _parse_host(value)
+            if parsed is None:
+                raise ValueError(f"允许的 Host 无效: {value}")
+            normalized_allowed.append(parsed)
+        self.allowed_hosts = frozenset(normalized_allowed)
+        self.basic_auth = None
+        if access_mode == "campus":
+            if basic_auth_file is None:
+                raise ValueError("campus 模式必须提供 --basic-auth-file")
+            self.basic_auth = BasicAuthStore(Path(basic_auth_file))
 
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http":
             return await self.app(scope, receive, send)
         headers = {key.decode("latin1").lower(): value.decode("latin1") for key, value in scope["headers"]}
 
-        async def reject(status, detail):
-            await JSONResponse({"detail": detail}, status_code=status)(scope, receive, send)
+        async def reject(status, detail, response_headers=None):
+            await JSONResponse({"detail": detail}, status_code=status,
+                               headers=response_headers or {})(scope, receive, send)
 
         host = headers.get("host", "")
-        try:
-            parsed = urlsplit("http://" + host)
-            valid_host = (parsed.hostname in LOOPBACK_HOSTS and not parsed.username and not parsed.password
-                          and not parsed.path and not parsed.query and not parsed.fragment
-                          and parsed.port != 0)
-        except ValueError:
-            valid_host = False
+        parsed_host = _parse_host(host)
+        if self.access_mode == "local":
+            valid_host = bool(parsed_host and _is_loopback_host(parsed_host[0]))
+        else:
+            valid_host = bool(parsed_host and not _is_loopback_host(parsed_host[0])
+                              and any(parsed_host[0] == allowed_host
+                                      and (allowed_port is None or parsed_host[1] == allowed_port)
+                                      for allowed_host, allowed_port in self.allowed_hosts))
         if not valid_host:
-            return await reject(403, "Studio 仅接受本机 Host")
+            detail = "Studio 仅接受本机 Host" if self.access_mode == "local" else "Host 不在校园网允许列表中"
+            return await reject(403, detail)
+        if self.basic_auth is not None:
+            authorization = headers.get("authorization", "")
+            supplied_user = supplied_password = None
+            if authorization.lower().startswith("basic "):
+                try:
+                    decoded = base64.b64decode(authorization[6:].strip().encode("ascii"), validate=True).decode("utf-8")
+                    supplied_user, supplied_password = decoded.split(":", 1)
+                except (ValueError, UnicodeError, binascii.Error):
+                    supplied_user = supplied_password = None
+            authenticated = (supplied_user is not None and self.basic_auth.verify(supplied_user, supplied_password))
+            if not authenticated:
+                return await reject(401, "需要登录 Studio",
+                                    {"www-authenticate": 'Basic realm="VibeNovel Studio", charset="UTF-8"'})
         origin = headers.get("origin")
         if origin and origin != f'{scope.get("scheme", "http")}://{host}':
             return await reject(403, "拒绝跨来源请求")
@@ -372,7 +539,22 @@ class LocalBoundary:
         return await self.app(scope, replay, secure_send)
 
 
-def create_app(workspace: Path, *, frontend_dir: Optional[Path] = None, job_manager=None) -> FastAPI:
+def create_app(workspace: Path, *, frontend_dir: Optional[Path] = None, job_manager=None,
+               access_mode: str = "local", allowed_hosts=None,
+               basic_auth_file: Optional[Path] = None) -> FastAPI:
+    # Starlette instantiates middleware lazily on the first request.  Validate
+    # the remote boundary here as well so a malformed campus deployment fails
+    # during startup rather than after it has begun listening.
+    if access_mode not in {"local", "campus"}:
+        raise ValueError("访问模式只能是 local 或 campus")
+    if access_mode == "campus":
+        if not allowed_hosts:
+            raise ValueError("campus 模式必须明确提供至少一个 --allowed-host")
+        if basic_auth_file is None:
+            raise ValueError("campus 模式必须提供 --basic-auth-file")
+        BasicAuthStore(Path(basic_auth_file))
+    elif allowed_hosts or basic_auth_file is not None:
+        raise ValueError("local 模式不能配置校园网 Host 或 Basic Auth")
     store = ProjectStore(workspace)
     config = load_config(store.workspace)
     jobs = job_manager if job_manager is not None else JobManager(store.workspace)
@@ -398,7 +580,8 @@ def create_app(workspace: Path, *, frontend_dir: Optional[Path] = None, job_mana
                   docs_url=None, redoc_url=None, openapi_url=None)
     app.state.jobs = jobs
     app.state.workspace = store.workspace
-    app.add_middleware(LocalBoundary, token=token)
+    app.add_middleware(LocalBoundary, token=token, access_mode=access_mode,
+                       allowed_hosts=allowed_hosts, basic_auth_file=basic_auth_file)
     install_library_routes(app, store.workspace, store)
     app.state.reference_batches = install_reference_routes(app, store.workspace, store, jobs)
     app.state.research_gateway = ResearchGateway(store.workspace)
@@ -864,20 +1047,46 @@ def create_app(workspace: Path, *, frontend_dir: Optional[Path] = None, job_mana
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="VibeNovel Studio — 本地作者工作台")
+    parser = argparse.ArgumentParser(description="VibeNovel Studio — 作者工作台（默认仅本机）")
     parser.add_argument("--workspace", type=Path, default=Path.cwd())
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--frontend", type=Path, help="前端 dist 目录（默认源码 studio/dist）")
+    parser.add_argument("--host", default="127.0.0.1",
+                        help="监听地址；local 默认 127.0.0.1，campus 必须是明确的非回环地址")
+    parser.add_argument("--access-mode", choices=("local", "campus"), default="local",
+                        help="访问边界；campus 需要 --allowed-host 和 --basic-auth-file")
+    parser.add_argument("--allowed-host", action="append", default=[], metavar="HOST[:PORT]",
+                        help="campus 模式允许的 Host，可重复；不含端口时允许该 Host 的任意端口")
+    parser.add_argument("--basic-auth-file", type=Path,
+                        help="campus 模式的 PBKDF2 Basic Auth 凭据文件（建议 chmod 600）")
     args = parser.parse_args(argv)
     if not 1 <= args.port <= 65535:
         parser.error("端口需要 1–65535")
+    bind_host = _parse_host(args.host)
+    if bind_host is None or bind_host[1] is not None:
+        parser.error("--host 必须是明确的主机名或 IP，不要包含端口")
+    if args.access_mode == "campus":
+        if _is_loopback_host(bind_host[0]) or _is_wildcard_bind_host(bind_host[0]):
+            parser.error("campus 模式必须绑定明确的非回环、非通配校园网地址")
+        if not args.allowed_host:
+            parser.error("campus 模式必须至少提供一个 --allowed-host")
+        if args.basic_auth_file is None:
+            parser.error("campus 模式必须提供 --basic-auth-file")
+    elif not _is_loopback_host(bind_host[0]):
+        parser.error("local 模式只能监听回环地址；请改用 --access-mode campus")
+    elif args.allowed_host or args.basic_auth_file is not None:
+        # Local mode intentionally has no half-configured remote variant.
+        parser.error("local 模式不能配置 --allowed-host 或 --basic-auth-file")
     import uvicorn
     try:
-        app = create_app(args.workspace, frontend_dir=args.frontend)
-    except (VibeNovelError, OSError) as exc:
+        app = create_app(args.workspace, frontend_dir=args.frontend, access_mode=args.access_mode,
+                         allowed_hosts=args.allowed_host, basic_auth_file=args.basic_auth_file)
+    except (VibeNovelError, OSError, ValueError) as exc:
         parser.error(str(exc))
-    print(f"VibeNovel Studio http://127.0.0.1:{args.port} — Ctrl+C 停止后端", flush=True)
-    uvicorn.run(app, host="127.0.0.1", port=args.port, access_log=False, proxy_headers=False)
+    uvicorn_host = bind_host[0]
+    display_host = f"[{uvicorn_host}]" if ":" in uvicorn_host else uvicorn_host
+    print(f"VibeNovel Studio http://{display_host}:{args.port} — Ctrl+C 停止后端", flush=True)
+    uvicorn.run(app, host=uvicorn_host, port=args.port, access_log=False, proxy_headers=False)
 
 
 if __name__ == "__main__":
